@@ -11,7 +11,7 @@ pub fn encode_hex(bytes: &[u8]) -> String {
 
 pub fn decode_hex(input: &str) -> Result<Vec<u8>> {
     let cleaned = input.trim();
-    if cleaned.len() % 2 != 0 {
+    if !cleaned.len().is_multiple_of(2) {
         return Err(anyhow!("invalid hex length"));
     }
     let mut output = Vec::with_capacity(cleaned.len() / 2);

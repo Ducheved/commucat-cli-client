@@ -32,7 +32,7 @@ pub struct EngineHandle {
 
 #[derive(Debug)]
 pub enum EngineCommand {
-    Connect(ClientState),
+    Connect(Box<ClientState>),
     Disconnect,
     Join {
         channel_id: u64,
@@ -188,7 +188,7 @@ impl ActiveConnection {
             .context("send request")?;
         let device_id = state.device_id.clone();
         let pattern_label = state.noise_pattern.to_uppercase();
-        let device_keys = state.into_device_keypair()?;
+        let device_keys = state.device_keypair()?;
         let pattern = parse_pattern(&state.noise_pattern)?;
         let remote_static = if let HandshakePattern::Ik = pattern {
             let raw = state
@@ -424,7 +424,7 @@ async fn engine_loop(
                         .await;
                     continue;
                 }
-                match ActiveConnection::connect(state.clone(), events.clone()).await {
+                match ActiveConnection::connect(*state, events.clone()).await {
                     Ok(conn) => {
                         let session = conn.session_id.clone();
                         let _ = events
@@ -547,10 +547,10 @@ fn control_payload(payload: FramePayload) -> Result<serde_json::Value> {
 }
 
 fn is_handshake_ack(frame: &Frame) -> bool {
-    if let FramePayload::Control(ControlEnvelope { properties }) = &frame.payload {
-        if let Some(value) = properties.get("handshake") {
-            return value == "ok";
-        }
+    if let FramePayload::Control(ControlEnvelope { properties }) = &frame.payload
+        && let Some(value) = properties.get("handshake")
+    {
+        return value == "ok";
     }
     false
 }

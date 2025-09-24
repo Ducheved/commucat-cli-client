@@ -23,6 +23,23 @@ pub struct ClientState {
     pub traceparent: Option<String>,
 }
 
+/// Параметры формирования ClientState без чтения из файла.
+#[derive(Debug, Clone)]
+pub struct ClientStateParams {
+    pub device_id: String,
+    pub server_url: String,
+    pub domain: String,
+    pub keys: DeviceKeyPair,
+    pub pattern: String,
+    pub prologue: String,
+    pub tls_ca_path: Option<String>,
+    pub server_static: Option<String>,
+    pub insecure: bool,
+    pub presence_state: String,
+    pub presence_interval_secs: u64,
+    pub traceparent: Option<String>,
+}
+
 impl ClientState {
     pub fn load() -> Result<Self> {
         let path = state_path()?;
@@ -52,40 +69,27 @@ impl ClientState {
         fs::write(path, payload).context("write state")
     }
 
-    pub fn into_device_keypair(&self) -> Result<DeviceKeyPair> {
+    pub fn device_keypair(&self) -> Result<DeviceKeyPair> {
         let private = decode_hex32(&self.private_key)?;
         let public = decode_hex32(&self.public_key)?;
         Ok(DeviceKeyPair { public, private })
     }
 
-    pub fn with_device_keys(
-        device_id: String,
-        server_url: String,
-        domain: String,
-        keys: &DeviceKeyPair,
-        pattern: String,
-        prologue: String,
-        tls_ca_path: Option<String>,
-        server_static: Option<String>,
-        insecure: bool,
-        presence_state: String,
-        presence_interval_secs: u64,
-        traceparent: Option<String>,
-    ) -> Self {
+    pub fn from_params(params: ClientStateParams) -> Self {
         ClientState {
-            device_id,
-            server_url,
-            domain,
-            private_key: encode_hex(&keys.private),
-            public_key: encode_hex(&keys.public),
-            noise_pattern: pattern,
-            prologue,
-            tls_ca_path,
-            server_static,
-            insecure,
-            presence_state,
-            presence_interval_secs,
-            traceparent,
+            device_id: params.device_id,
+            server_url: params.server_url,
+            domain: params.domain,
+            private_key: encode_hex(&params.keys.private),
+            public_key: encode_hex(&params.keys.public),
+            noise_pattern: params.pattern,
+            prologue: params.prologue,
+            tls_ca_path: params.tls_ca_path,
+            server_static: params.server_static,
+            insecure: params.insecure,
+            presence_state: params.presence_state,
+            presence_interval_secs: params.presence_interval_secs,
+            traceparent: params.traceparent,
         }
     }
 }
@@ -124,23 +128,23 @@ mod tests {
             public: [1u8; 32],
             private: [2u8; 32],
         };
-        let state = ClientState::with_device_keys(
-            "device".to_string(),
-            "https://example.org:8443".to_string(),
-            "example.org".to_string(),
-            &keys,
-            "XK".to_string(),
-            "commucat".to_string(),
-            None,
-            None,
-            false,
-            "online".to_string(),
-            30,
-            None,
-        );
+        let state = ClientState::from_params(ClientStateParams {
+            device_id: "device".to_string(),
+            server_url: "https://example.org:8443".to_string(),
+            domain: "example.org".to_string(),
+            keys,
+            pattern: "XK".to_string(),
+            prologue: "commucat".to_string(),
+            tls_ca_path: None,
+            server_static: None,
+            insecure: false,
+            presence_state: "online".to_string(),
+            presence_interval_secs: 30,
+            traceparent: None,
+        });
         assert_eq!(state.device_id, "device");
         assert_eq!(state.noise_pattern, "XK");
-        let pair = state.into_device_keypair().unwrap();
+        let pair = state.device_keypair().unwrap();
         assert_eq!(pair.public, [1u8; 32]);
         assert_eq!(pair.private, [2u8; 32]);
     }

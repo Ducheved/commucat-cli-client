@@ -70,8 +70,7 @@ struct App {
 
 impl App {
     fn new(state: ClientState, engine: EngineHandle, events: Receiver<ClientEvent>) -> Self {
-        let mut channels = Vec::new();
-        channels.push(ChannelView::system());
+        let channels = vec![ChannelView::system()];
         App {
             state,
             engine,
@@ -108,12 +107,10 @@ impl App {
             KeyCode::Enter => {
                 let command = self.input.trim().to_string();
                 self.input.clear();
-                if !command.is_empty() {
-                    if command.starts_with(':') {
-                        self.execute_command(&command[1..]).await?;
-                    } else {
-                        self.send_text(command).await?;
-                    }
+                if let Some(stripped) = command.strip_prefix(':') {
+                    self.execute_command(stripped).await?;
+                } else if !command.is_empty() {
+                    self.send_text(command).await?;
                 }
             }
             KeyCode::Esc => {
@@ -168,13 +165,10 @@ impl App {
                 }
             }
             FrameType::Ack => {
-                if let FramePayload::Control(ControlEnvelope { properties }) = frame.payload {
-                    if let Some(value) = properties.get("ack") {
-                        self.record_system(format!(
-                            "ACK {} для канала {}",
-                            value, frame.channel_id
-                        ));
-                    }
+                if let FramePayload::Control(ControlEnvelope { properties }) = frame.payload
+                    && let Some(value) = properties.get("ack")
+                {
+                    self.record_system(format!("ACK {} для канала {}", value, frame.channel_id));
                 }
             }
             FrameType::Presence => {
@@ -200,21 +194,21 @@ impl App {
                 }
             }
             FrameType::Join => {
-                if let FramePayload::Control(ControlEnvelope { properties }) = frame.payload {
-                    if let Some(array) = properties.get("members").and_then(|v| v.as_array()) {
-                        let members = array
-                            .iter()
-                            .filter_map(|v| v.as_str())
-                            .map(ToString::to_string)
-                            .collect::<Vec<_>>();
-                        self.ensure_channel(frame.channel_id)
-                            .set_members(members.clone());
-                        self.record_system(format!(
-                            "channel {} members: {}",
-                            frame.channel_id,
-                            members.join(", ")
-                        ));
-                    }
+                if let FramePayload::Control(ControlEnvelope { properties }) = frame.payload
+                    && let Some(array) = properties.get("members").and_then(|v| v.as_array())
+                {
+                    let members = array
+                        .iter()
+                        .filter_map(|v| v.as_str())
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>();
+                    self.ensure_channel(frame.channel_id)
+                        .set_members(members.clone());
+                    self.record_system(format!(
+                        "channel {} members: {}",
+                        frame.channel_id,
+                        members.join(", ")
+                    ));
                 }
             }
             FrameType::Leave => {
@@ -286,7 +280,7 @@ impl App {
             "export" => {
                 let summary = crate::device::describe_keys(
                     &self.state.device_id,
-                    &self.state.into_device_keypair()?,
+                    &self.state.device_keypair()?,
                 );
                 self.record_system(summary);
             }
@@ -305,7 +299,7 @@ impl App {
         }
         self.record_system("подключение...".to_string());
         self.engine
-            .send(EngineCommand::Connect(self.state.clone()))
+            .send(EngineCommand::Connect(Box::new(self.state.clone())))
             .await?;
         Ok(())
     }

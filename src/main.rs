@@ -4,7 +4,7 @@ mod engine;
 mod hexutil;
 mod tui;
 
-use crate::config::{ClientState, docs_path, state_path};
+use crate::config::{ClientState, ClientStateParams, docs_path, state_path};
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use std::fs;
@@ -22,6 +22,7 @@ struct Cli {
     command: Option<Command>,
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum Command {
     Init(InitArgs),
@@ -95,20 +96,20 @@ fn init_profile(args: InitArgs) -> Result<()> {
         .device_id
         .unwrap_or_else(|| device::generate_device_id("device"));
     let keys = device::generate_keypair()?;
-    let state = ClientState::with_device_keys(
-        device_id.clone(),
-        args.server,
-        args.domain,
-        &keys,
-        args.pattern,
-        args.prologue,
-        args.tls_ca,
-        args.server_static,
-        args.insecure,
-        args.presence,
-        args.presence_interval,
-        args.traceparent,
-    );
+    let state = ClientState::from_params(ClientStateParams {
+        device_id: device_id.clone(),
+        server_url: args.server,
+        domain: args.domain,
+        keys: keys.clone(),
+        pattern: args.pattern,
+        prologue: args.prologue,
+        tls_ca_path: args.tls_ca,
+        server_static: args.server_static,
+        insecure: args.insecure,
+        presence_state: args.presence,
+        presence_interval_secs: args.presence_interval,
+        traceparent: args.traceparent,
+    });
     state.save()?;
     println!("state saved to {}", path.display());
     println!("{}", device::describe_keys(&device_id, &keys));
@@ -124,7 +125,7 @@ fn init_profile(args: InitArgs) -> Result<()> {
 
 fn export_profile() -> Result<()> {
     let state = ClientState::load()?;
-    let keys = state.into_device_keypair()?;
+    let keys = state.device_keypair()?;
     println!("{}", device::describe_keys(&state.device_id, &keys));
     println!("server_url={} domain={}", state.server_url, state.domain);
     Ok(())
