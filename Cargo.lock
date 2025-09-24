@@ -378,6 +378,7 @@ dependencies = [
 [[package]]
 name = "commucat-crypto"
 version = "1.0.0"
+source = "git+https://github.com/Ducheved/commucat.git?rev=cd0afa237e9c1ea3c3913fc1f62bb7375101d4a8#cd0afa237e9c1ea3c3913fc1f62bb7375101d4a8"
 dependencies = [
  "blake3",
  "ed25519-dalek",
@@ -389,6 +390,7 @@ dependencies = [
 [[package]]
 name = "commucat-proto"
 version = "1.0.0"
+source = "git+https://github.com/Ducheved/commucat.git?rev=cd0afa237e9c1ea3c3913fc1f62bb7375101d4a8#cd0afa237e9c1ea3c3913fc1f62bb7375101d4a8"
 dependencies = [
  "serde",
  "serde_json",

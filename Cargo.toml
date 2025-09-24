@@ -17,8 +17,8 @@ anyhow = "1.0"
 bytes = "1.5"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4.4", features = ["derive"] }
-commucat-crypto = { path = "../commucat/crates/crypto" }
-commucat-proto = { path = "../commucat/crates/proto" }
+commucat-crypto = { git = "https://github.com/Ducheved/commucat.git", package = "commucat-crypto", rev = "cd0afa237e9c1ea3c3913fc1f62bb7375101d4a8" }
+commucat-proto = { git = "https://github.com/Ducheved/commucat.git", package = "commucat-proto", rev = "cd0afa237e9c1ea3c3913fc1f62bb7375101d4a8" }
 crossterm = { version = "0.27", features = ["event-stream"] }
 futures = "0.3"
 h2 = "0.3"
