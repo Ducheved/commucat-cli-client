@@ -1,0 +1,40 @@
+name: Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Package artifact
+        run: |
+          mkdir -p dist
+          cp target/release/commucat-cli-client dist/
+          cp README.md dist/README.md
+          tar -czf commucat-cli-client-linux-amd64.tar.gz -C dist commucat-cli-client README.md
+
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: commucat-cli-client-linux-amd64.tar.gz
+          generate_release_notes: true
