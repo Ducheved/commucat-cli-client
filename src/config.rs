@@ -268,21 +268,14 @@ pub fn state_path() -> Result<PathBuf> {
     }
 
     if let Some(base_dirs) = BaseDirs::new() {
-        return Ok(
-            base_dirs
-                .config_dir()
-                .join("commucat")
-                .join("client.json"),
-        );
+        return Ok(base_dirs.config_dir().join("commucat").join("client.json"));
     }
 
     if let Ok(home) = env::var("HOME") {
-        return Ok(
-            Path::new(&home)
-                .join(".config")
-                .join("commucat")
-                .join("client.json"),
-        );
+        return Ok(Path::new(&home)
+            .join(".config")
+            .join("commucat")
+            .join("client.json"));
     }
 
     Err(anyhow!("unable to determine state directory"))
