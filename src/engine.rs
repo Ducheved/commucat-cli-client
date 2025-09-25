@@ -53,11 +53,20 @@ pub enum EngineCommand {
 
 #[derive(Debug, Clone)]
 pub enum ClientEvent {
-    Connected { session_id: String },
-    Disconnected { reason: String },
+    Connected {
+        session_id: String,
+        pairing_required: bool,
+    },
+    Disconnected {
+        reason: String,
+    },
     Frame(Frame),
-    Error { detail: String },
-    Log { line: String },
+    Error {
+        detail: String,
+    },
+    Log {
+        line: String,
+    },
 }
 
 pub fn create_engine(buffer: usize, queue: usize) -> (EngineHandle, mpsc::Receiver<ClientEvent>) {
@@ -90,6 +99,7 @@ struct ActiveConnection {
     sequence: u64,
     reader_task: JoinHandle<()>,
     driver_task: JoinHandle<()>,
+    pairing_required: bool,
 }
 
 impl ActiveConnection {
@@ -341,7 +351,7 @@ impl ActiveConnection {
                                 next_sequence = 3;
                             }
                             FrameType::Ack => {
-                                if is_handshake_ack(&frame) {
+                                if let Some(required) = parse_handshake_ack(&frame) {
                                     if session_id.is_empty() {
                                         session_id = "unknown".to_string();
                                     }
@@ -353,7 +363,16 @@ impl ActiveConnection {
                                         sequence: next_sequence,
                                         reader_task,
                                         driver_task,
+                                        pairing_required: required,
                                     };
+                                    if required {
+                                        let _ = events
+                                            .send(ClientEvent::Log {
+                                                line: "сервер требует pairing для новых устройств"
+                                                    .to_string(),
+                                            })
+                                            .await;
+                                    }
                                     let _ = events
                                         .send(ClientEvent::Log {
                                             line: format!("handshake ok: session {}", session_id),
@@ -482,9 +501,11 @@ async fn engine_loop(
                 match ActiveConnection::connect(*state, events.clone()).await {
                     Ok(conn) => {
                         let session = conn.session_id.clone();
+                        let pairing_required = conn.pairing_required;
                         let _ = events
                             .send(ClientEvent::Connected {
                                 session_id: session,
+                                pairing_required,
                             })
                             .await;
                         connection = Some(conn);
@@ -601,13 +622,22 @@ fn control_payload(payload: FramePayload) -> Result<serde_json::Value> {
     }
 }
 
-fn is_handshake_ack(frame: &Frame) -> bool {
+fn parse_handshake_ack(frame: &Frame) -> Option<bool> {
     if let FramePayload::Control(ControlEnvelope { properties }) = &frame.payload {
-        if let Some(value) = properties.get("handshake") {
-            return value == "ok";
+        if properties
+            .get("handshake")
+            .and_then(|v| v.as_str())
+            .map(|v| v == "ok")
+            .unwrap_or(false)
+        {
+            let required = properties
+                .get("pairing_required")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            return Some(required);
         }
     }
-    false
+    None
 }
 
 fn spawn_reader(

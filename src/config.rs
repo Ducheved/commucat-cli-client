@@ -29,6 +29,16 @@ pub struct ClientState {
     pub user_avatar_url: Option<String>,
     #[serde(default)]
     pub user_id: Option<String>,
+    #[serde(default)]
+    pub session_token: Option<String>,
+    #[serde(default)]
+    pub device_name: Option<String>,
+    #[serde(default)]
+    pub last_pairing_code: Option<String>,
+    #[serde(default)]
+    pub last_pairing_expires_at: Option<String>,
+    #[serde(default)]
+    pub last_pairing_issuer_device_id: Option<String>,
 }
 
 /// Параметры формирования ClientState без чтения из файла.
@@ -50,6 +60,8 @@ pub struct ClientStateParams {
     pub user_display_name: Option<String>,
     pub user_avatar_url: Option<String>,
     pub user_id: Option<String>,
+    pub session_token: Option<String>,
+    pub device_name: Option<String>,
 }
 
 impl ClientState {
@@ -106,7 +118,17 @@ impl ClientState {
             user_display_name: params.user_display_name,
             user_avatar_url: params.user_avatar_url,
             user_id: params.user_id,
+            session_token: params.session_token,
+            device_name: params.device_name,
+            last_pairing_code: None,
+            last_pairing_expires_at: None,
+            last_pairing_issuer_device_id: None,
         }
+    }
+
+    pub fn update_keys(&mut self, keys: &DeviceKeyPair) {
+        self.private_key = encode_hex(&keys.private);
+        self.public_key = encode_hex(&keys.public);
     }
 }
 
@@ -161,6 +183,8 @@ mod tests {
             user_display_name: None,
             user_avatar_url: None,
             user_id: None,
+            session_token: None,
+            device_name: None,
         });
         assert_eq!(state.device_id, "device");
         assert_eq!(state.noise_pattern, "XK");

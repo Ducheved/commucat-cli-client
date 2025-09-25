@@ -1,7 +1,8 @@
 use crate::config::ClientState;
 use crate::engine::{ClientEvent, EngineCommand, EngineHandle, create_engine};
 use crate::hexutil::encode_hex;
-use anyhow::{Context, Result};
+use crate::rest::{DeviceEntry, PairingTicket, RestClient};
+use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Utc};
 use commucat_proto::{ControlEnvelope, Frame as ProtoFrame, FramePayload, FrameType};
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyModifiers};
@@ -128,11 +129,23 @@ impl App {
 
     async fn handle_client_event(&mut self, event: ClientEvent) -> Result<()> {
         match event {
-            ClientEvent::Connected { session_id } => {
+            ClientEvent::Connected {
+                session_id,
+                pairing_required,
+            } => {
                 self.connected = true;
                 self.session_id = Some(session_id.clone());
                 self.pending_disconnect = false;
                 self.record_system(format!("сессия {} установлена", session_id));
+                self.state.session_token = Some(session_id.clone());
+                if let Err(err) = self.state.save() {
+                    self.record_system(format!("не удалось сохранить профиль: {}", err));
+                }
+                if pairing_required {
+                    self.record_system(
+                        "Лимит auto-approve исчерпан: используйте :pair и init --pair-code на новом устройстве".to_string(),
+                    );
+                }
             }
             ClientEvent::Disconnected { reason } => {
                 self.connected = false;
@@ -165,10 +178,13 @@ impl App {
                 }
             }
             FrameType::Ack => {
-                if let FramePayload::Control(ControlEnvelope { properties }) = frame.payload
-                    && let Some(value) = properties.get("ack")
-                {
-                    self.record_system(format!("ACK {} для канала {}", value, frame.channel_id));
+                if let FramePayload::Control(ControlEnvelope { properties }) = &frame.payload {
+                    if let Some(value) = properties.get("ack") {
+                        self.record_system(format!(
+                            "ACK {} для канала {}",
+                            value, frame.channel_id
+                        ));
+                    }
                 }
             }
             FrameType::Presence => {
@@ -194,21 +210,21 @@ impl App {
                 }
             }
             FrameType::Join => {
-                if let FramePayload::Control(ControlEnvelope { properties }) = frame.payload
-                    && let Some(array) = properties.get("members").and_then(|v| v.as_array())
-                {
-                    let members = array
-                        .iter()
-                        .filter_map(|v| v.as_str())
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>();
-                    self.ensure_channel(frame.channel_id)
-                        .set_members(members.clone());
-                    self.record_system(format!(
-                        "channel {} members: {}",
-                        frame.channel_id,
-                        members.join(", ")
-                    ));
+                if let FramePayload::Control(ControlEnvelope { properties }) = &frame.payload {
+                    if let Some(array) = properties.get("members").and_then(|v| v.as_array()) {
+                        let members = array
+                            .iter()
+                            .filter_map(|v| v.as_str())
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>();
+                        self.ensure_channel(frame.channel_id)
+                            .set_members(members.clone());
+                        self.record_system(format!(
+                            "channel {} members: {}",
+                            frame.channel_id,
+                            members.join(", ")
+                        ));
+                    }
                 }
             }
             FrameType::Leave => {
@@ -276,6 +292,25 @@ impl App {
                         .send(EngineCommand::Presence { state: state_value })
                         .await?;
                 }
+            }
+            "pair" => {
+                let ttl = parts
+                    .next()
+                    .map(|v| v.parse::<i64>().context("ttl должно быть целым"))
+                    .transpose()?;
+                self.issue_pair_command(ttl).await?;
+            }
+            "devices" => match parts.next().unwrap_or("list").to_lowercase().as_str() {
+                "list" => self.devices_list_command().await?,
+                "revoke" => {
+                    let target = parts.next().ok_or_else(|| anyhow!("укажите device_id"))?;
+                    self.devices_revoke_command(target).await?;
+                }
+                other => self.record_system(format!("неизвестная подкоманда devices: {}", other)),
+            },
+            "revoke" => {
+                let target = parts.next().ok_or_else(|| anyhow!("укажите device_id"))?;
+                self.devices_revoke_command(target).await?;
             }
             "export" => {
                 let summary = crate::device::describe_keys(
@@ -371,6 +406,78 @@ impl App {
         Ok(())
     }
 
+    async fn issue_pair_command(&mut self, ttl: Option<i64>) -> Result<()> {
+        let client = self.rest_client()?;
+        let session = self.resolve_session_token()?;
+        let ticket = client.create_pairing(&session, ttl).await?;
+        self.state.last_pairing_code = Some(ticket.pair_code.clone());
+        self.state.last_pairing_expires_at = Some(ticket.expires_at.clone());
+        self.state.last_pairing_issuer_device_id = ticket.issuer_device_id.clone();
+        self.state.session_token = Some(session);
+        if let Err(err) = self.state.save() {
+            self.record_system(format!("не удалось сохранить профиль: {}", err));
+        }
+        self.record_pairing_ticket(&ticket);
+        Ok(())
+    }
+
+    async fn devices_list_command(&mut self) -> Result<()> {
+        let client = self.rest_client()?;
+        let session = self.resolve_session_token()?;
+        let devices = client.list_devices(&session).await?;
+        if devices.is_empty() {
+            self.record_system("Нет зарегистрированных устройств.".to_string());
+        } else {
+            for device in devices {
+                self.record_device_entry(&device);
+            }
+        }
+        Ok(())
+    }
+
+    async fn devices_revoke_command(&mut self, device_id: &str) -> Result<()> {
+        let client = self.rest_client()?;
+        let session = self.resolve_session_token()?;
+        client.revoke_device(&session, device_id).await?;
+        self.record_system(format!("Устройство {} помечено как revoked", device_id));
+        Ok(())
+    }
+
+    fn rest_client(&self) -> Result<RestClient> {
+        RestClient::new(&self.state.server_url)
+    }
+
+    fn resolve_session_token(&self) -> Result<String> {
+        if let Some(active) = self.session_id.as_ref() {
+            return Ok(active.clone());
+        }
+        if let Some(token) = self.state.session_token.as_ref() {
+            return Ok(token.clone());
+        }
+        bail!("нет активной сессии: выполните :connect или сохраните session через init");
+    }
+
+    fn record_pairing_ticket(&mut self, ticket: &PairingTicket) {
+        self.record_system(format!("Pair code: {}", ticket.pair_code));
+        if let Some(issuer) = ticket.issuer_device_id.as_ref() {
+            self.record_system(format!("Выдано устройством: {}", issuer));
+        }
+        self.record_system(format!("Действителен до: {}", ticket.expires_at));
+        self.record_system(format!("Seed: {}", ticket.device_seed));
+    }
+
+    fn record_device_entry(&mut self, entry: &DeviceEntry) {
+        let current = if entry.current {
+            " (текущее)"
+        } else {
+            ""
+        };
+        self.record_system(format!(
+            "{}\t{}\t{}{}",
+            entry.device_id, entry.status, entry.created_at, current
+        ));
+    }
+
     fn record_system(&mut self, text: String) {
         self.record_message(0, MessageDirection::System, text);
     }
@@ -423,7 +530,7 @@ impl App {
     }
 
     fn show_help(&mut self) {
-        self.record_system("Команды: :connect, :disconnect, :join <id> <members>, :relay <id> <members>, :leave <id>, :channel <id>, :presence <state>, :export, :clear, :quit".to_string());
+        self.record_system("Команды: :connect, :disconnect, :join <id> <members>, :relay <id> <members>, :leave <id>, :channel <id>, :presence <state>, :pair [ttl], :devices [list|revoke <id>], :export, :clear, :quit".to_string());
     }
 
     fn clear_messages(&mut self) {
