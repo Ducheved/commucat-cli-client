@@ -11,7 +11,7 @@ use rustls::client::{HandshakeSignatureValid, ServerCertVerified, ServerCertVeri
 use rustls::{
     Certificate, ClientConfig, DigitallySignedStruct, OwnedTrustAnchor, RootCertStore, ServerName,
 };
-use serde_json::json;
+use serde_json::{Map, Value, json};
 use std::convert::TryFrom;
 use std::fs::File;
 use std::io::BufReader;
@@ -93,7 +93,7 @@ struct ActiveConnection {
 }
 
 impl ActiveConnection {
-    async fn connect(state: ClientState, events: mpsc::Sender<ClientEvent>) -> Result<Self> {
+    async fn connect(mut state: ClientState, events: mpsc::Sender<ClientEvent>) -> Result<Self> {
         let uri: Uri = state.server_url.parse().context("invalid server url")?;
         let scheme = uri.scheme_str().unwrap_or("https");
         if scheme != "https" {
@@ -208,19 +208,36 @@ impl ActiveConnection {
         };
         let mut handshake = build_handshake(&noise, true).context("noise init")?;
         let hello_bytes = handshake.write_message(&[]).context("noise message one")?;
+        let mut hello_props: Map<String, Value> = Map::new();
+        hello_props.insert("protocol_version".to_string(), json!(PROTOCOL_VERSION));
+        hello_props.insert("pattern".to_string(), json!(pattern_label.clone()));
+        hello_props.insert("device_id".to_string(), json!(device_id.clone()));
+        hello_props.insert(
+            "client_static".to_string(),
+            json!(encode_hex(&device_keys.public)),
+        );
+        hello_props.insert("handshake".to_string(), json!(encode_hex(&hello_bytes)));
+        hello_props.insert("capabilities".to_string(), json!(["noise", "zstd"]));
+        if let Some(handle) = state.user_handle.clone() {
+            let mut user_payload: Map<String, Value> = Map::new();
+            user_payload.insert("handle".to_string(), json!(handle));
+            if let Some(user_id) = state.user_id.clone() {
+                user_payload.insert("id".to_string(), json!(user_id));
+            }
+            if let Some(name) = state.user_display_name.clone() {
+                user_payload.insert("display_name".to_string(), json!(name));
+            }
+            if let Some(avatar) = state.user_avatar_url.clone() {
+                user_payload.insert("avatar_url".to_string(), json!(avatar));
+            }
+            hello_props.insert("user".to_string(), Value::Object(user_payload));
+        }
         let hello_frame = Frame {
             channel_id: 0,
             sequence: 1,
             frame_type: FrameType::Hello,
             payload: FramePayload::Control(ControlEnvelope {
-                properties: json!({
-                    "protocol_version": PROTOCOL_VERSION,
-                    "pattern": pattern_label.clone(),
-                    "device_id": device_id.clone(),
-                    "client_static": encode_hex(&device_keys.public),
-                    "handshake": encode_hex(&hello_bytes),
-                    "capabilities": ["noise", "zstd"],
-                }),
+                properties: Value::Object(hello_props),
             }),
         };
         let _ = events
@@ -238,6 +255,7 @@ impl ActiveConnection {
         let mut buffer = BytesMut::new();
         let mut session_id = String::new();
         let mut next_sequence = 2u64;
+        let mut state_dirty = false;
         let connection = 'handshake: loop {
             match recv_stream.data().await {
                 Some(Ok(bytes)) => buffer.put_slice(&bytes),
@@ -267,6 +285,40 @@ impl ActiveConnection {
                                         .and_then(|v| v.as_str())
                                         .ok_or_else(|| anyhow!("session missing"))?
                                         .to_string();
+                                    if let Some(user) =
+                                        value.get("user").and_then(|v| v.as_object())
+                                    {
+                                        if let Some(id) = user.get("id").and_then(|v| v.as_str()) {
+                                            if state.user_id.as_deref() != Some(id) {
+                                                state.user_id = Some(id.to_string());
+                                                state_dirty = true;
+                                            }
+                                        }
+                                        if let Some(handle) =
+                                            user.get("handle").and_then(|v| v.as_str())
+                                        {
+                                            if state.user_handle.as_deref() != Some(handle) {
+                                                state.user_handle = Some(handle.to_string());
+                                                state_dirty = true;
+                                            }
+                                        }
+                                        if let Some(name) =
+                                            user.get("display_name").and_then(|v| v.as_str())
+                                        {
+                                            if state.user_display_name.as_deref() != Some(name) {
+                                                state.user_display_name = Some(name.to_string());
+                                                state_dirty = true;
+                                            }
+                                        }
+                                        if let Some(avatar) =
+                                            user.get("avatar_url").and_then(|v| v.as_str())
+                                        {
+                                            if state.user_avatar_url.as_deref() != Some(avatar) {
+                                                state.user_avatar_url = Some(avatar.to_string());
+                                                state_dirty = true;
+                                            }
+                                        }
+                                    }
                                 }
                                 let final_bytes = handshake
                                     .write_message(&[])
@@ -326,6 +378,9 @@ impl ActiveConnection {
                 }
             }
         };
+        if state_dirty {
+            state.save().context("persist client state")?;
+        }
         Ok(connection)
     }
 
@@ -547,10 +602,10 @@ fn control_payload(payload: FramePayload) -> Result<serde_json::Value> {
 }
 
 fn is_handshake_ack(frame: &Frame) -> bool {
-    if let FramePayload::Control(ControlEnvelope { properties }) = &frame.payload
-        && let Some(value) = properties.get("handshake")
-    {
-        return value == "ok";
+    if let FramePayload::Control(ControlEnvelope { properties }) = &frame.payload {
+        if let Some(value) = properties.get("handshake") {
+            return value == "ok";
+        }
     }
     false
 }

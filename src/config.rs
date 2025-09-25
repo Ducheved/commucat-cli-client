@@ -21,6 +21,14 @@ pub struct ClientState {
     pub presence_state: String,
     pub presence_interval_secs: u64,
     pub traceparent: Option<String>,
+    #[serde(default)]
+    pub user_handle: Option<String>,
+    #[serde(default)]
+    pub user_display_name: Option<String>,
+    #[serde(default)]
+    pub user_avatar_url: Option<String>,
+    #[serde(default)]
+    pub user_id: Option<String>,
 }
 
 /// Параметры формирования ClientState без чтения из файла.
@@ -38,6 +46,10 @@ pub struct ClientStateParams {
     pub presence_state: String,
     pub presence_interval_secs: u64,
     pub traceparent: Option<String>,
+    pub user_handle: Option<String>,
+    pub user_display_name: Option<String>,
+    pub user_avatar_url: Option<String>,
+    pub user_id: Option<String>,
 }
 
 impl ClientState {
@@ -90,6 +102,10 @@ impl ClientState {
             presence_state: params.presence_state,
             presence_interval_secs: params.presence_interval_secs,
             traceparent: params.traceparent,
+            user_handle: params.user_handle,
+            user_display_name: params.user_display_name,
+            user_avatar_url: params.user_avatar_url,
+            user_id: params.user_id,
         }
     }
 }
@@ -141,11 +157,16 @@ mod tests {
             presence_state: "online".to_string(),
             presence_interval_secs: 30,
             traceparent: None,
+            user_handle: Some("alice".to_string()),
+            user_display_name: None,
+            user_avatar_url: None,
+            user_id: None,
         });
         assert_eq!(state.device_id, "device");
         assert_eq!(state.noise_pattern, "XK");
         let pair = state.device_keypair().unwrap();
         assert_eq!(pair.public, [1u8; 32]);
         assert_eq!(pair.private, [2u8; 32]);
+        assert_eq!(state.user_handle.as_deref(), Some("alice"));
     }
 }

@@ -38,6 +38,12 @@ struct InitArgs {
     #[arg(long)]
     domain: String,
     #[arg(long)]
+    username: String,
+    #[arg(long)]
+    display_name: Option<String>,
+    #[arg(long)]
+    avatar_url: Option<String>,
+    #[arg(long)]
     device_id: Option<String>,
     #[arg(long, default_value = "XK")]
     pattern: String,
@@ -88,35 +94,60 @@ fn init_tracing() {
 }
 
 fn init_profile(args: InitArgs) -> Result<()> {
+    let InitArgs {
+        server,
+        domain,
+        username,
+        display_name,
+        avatar_url,
+        device_id,
+        pattern,
+        prologue,
+        tls_ca,
+        server_static,
+        insecure,
+        presence,
+        presence_interval,
+        traceparent,
+        force,
+    } = args;
     let path = state_path()?;
-    if path.exists() && !args.force {
+    if path.exists() && !force {
         bail!("профиль уже существует: {}", path.display());
     }
-    let device_id = args
-        .device_id
-        .unwrap_or_else(|| device::generate_device_id("device"));
+    let device_id = device_id.unwrap_or_else(|| device::generate_device_id("device"));
     let keys = device::generate_keypair()?;
     let state = ClientState::from_params(ClientStateParams {
         device_id: device_id.clone(),
-        server_url: args.server,
-        domain: args.domain,
+        server_url: server,
+        domain,
         keys: keys.clone(),
-        pattern: args.pattern,
-        prologue: args.prologue,
-        tls_ca_path: args.tls_ca,
-        server_static: args.server_static,
-        insecure: args.insecure,
-        presence_state: args.presence,
-        presence_interval_secs: args.presence_interval,
-        traceparent: args.traceparent,
+        pattern,
+        prologue,
+        tls_ca_path: tls_ca,
+        server_static,
+        insecure,
+        presence_state: presence,
+        presence_interval_secs: presence_interval,
+        traceparent,
+        user_handle: Some(username.clone()),
+        user_display_name: display_name.clone(),
+        user_avatar_url: avatar_url.clone(),
+        user_id: None,
     });
     state.save()?;
     println!("state saved to {}", path.display());
     println!("{}", device::describe_keys(&device_id, &keys));
     println!(
-        "Для регистрации устройства выполните на сервере: commucat-cli rotate-keys {}",
-        device_id
+        "Устройство зарегистрируется автоматически при первом подключении как пользователь '{}'.",
+        username
     );
+    if let Some(name) = display_name {
+        println!("display_name={} (отправляется на сервер)", name);
+    }
+    if let Some(url) = avatar_url {
+        println!("avatar_url={} (будет применён при handshake)", url);
+    }
     if let Ok(doc_path) = docs_path("ru") {
         println!("Руководство: {}", doc_path.display());
     }
