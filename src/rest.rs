@@ -83,6 +83,41 @@ impl RestClient {
         Ok(envelope.devices)
     }
 
+    pub async fn list_friends(&self, session: &str) -> Result<Vec<FriendEntryPayload>> {
+        let mut endpoint = self.base.clone();
+        endpoint.set_path("api/friends");
+        let response = self
+            .client
+            .get(endpoint)
+            .bearer_auth(session)
+            .send()
+            .await
+            .context("request /api/friends")?;
+        let envelope: FriendsEnvelope = Self::parse_response(response, StatusCode::OK).await?;
+        Ok(envelope.friends)
+    }
+
+    pub async fn update_friends(
+        &self,
+        session: &str,
+        friends: &[FriendEntryPayload],
+    ) -> Result<()> {
+        let mut endpoint = self.base.clone();
+        endpoint.set_path("api/friends");
+        let response = self
+            .client
+            .put(endpoint)
+            .bearer_auth(session)
+            .json(&FriendsEnvelope {
+                friends: friends.to_vec(),
+            })
+            .send()
+            .await
+            .context("request /api/friends")?;
+        let _: Value = Self::parse_response(response, StatusCode::OK).await?;
+        Ok(())
+    }
+
     pub async fn revoke_device(&self, session: &str, device_id: &str) -> Result<()> {
         let mut endpoint = self.base.clone();
         endpoint.set_path("api/devices/revoke");
@@ -172,6 +207,11 @@ struct DevicesEnvelope {
     devices: Vec<DeviceEntry>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct FriendsEnvelope {
+    friends: Vec<FriendEntryPayload>,
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct ServerInfo {
     pub domain: String,
@@ -203,6 +243,15 @@ pub struct DeviceEntry {
     pub public_key: String,
     #[serde(default)]
     pub current: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct FriendEntryPayload {
+    pub user_id: String,
+    #[serde(default)]
+    pub handle: Option<String>,
+    #[serde(default)]
+    pub alias: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

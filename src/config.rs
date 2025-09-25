@@ -39,10 +39,20 @@ pub struct ClientState {
     pub last_pairing_expires_at: Option<String>,
     #[serde(default)]
     pub last_pairing_issuer_device_id: Option<String>,
+    #[serde(default)]
+    pub friends: Vec<FriendEntry>,
 }
 
 /// Параметры формирования ClientState без чтения из файла.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FriendEntry {
+    pub user_id: String,
+    #[serde(default)]
+    pub handle: Option<String>,
+    #[serde(default)]
+    pub alias: Option<String>,
+}
+
 pub struct ClientStateParams {
     pub device_id: String,
     pub server_url: String,
@@ -62,6 +72,7 @@ pub struct ClientStateParams {
     pub user_id: Option<String>,
     pub session_token: Option<String>,
     pub device_name: Option<String>,
+    pub friends: Vec<FriendEntry>,
 }
 
 impl ClientState {
@@ -123,7 +134,34 @@ impl ClientState {
             last_pairing_code: None,
             last_pairing_expires_at: None,
             last_pairing_issuer_device_id: None,
+            friends: params.friends,
         }
+    }
+
+    pub fn friends(&self) -> &[FriendEntry] {
+        &self.friends
+    }
+
+    pub fn set_friends(&mut self, friends: Vec<FriendEntry>) {
+        self.friends = friends;
+    }
+
+    pub fn upsert_friend(&mut self, entry: FriendEntry) {
+        if let Some(existing) = self
+            .friends
+            .iter_mut()
+            .find(|friend| friend.user_id == entry.user_id)
+        {
+            *existing = entry;
+        } else {
+            self.friends.push(entry);
+        }
+    }
+
+    pub fn remove_friend(&mut self, user_id: &str) -> bool {
+        let before = self.friends.len();
+        self.friends.retain(|friend| friend.user_id != user_id);
+        before != self.friends.len()
     }
 
     pub fn update_keys(&mut self, keys: &DeviceKeyPair) {
@@ -185,6 +223,7 @@ mod tests {
             user_id: None,
             session_token: None,
             device_name: None,
+            friends: Vec::new(),
         });
         assert_eq!(state.device_id, "device");
         assert_eq!(state.noise_pattern, "XK");

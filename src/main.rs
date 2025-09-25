@@ -5,11 +5,13 @@ mod hexutil;
 mod rest;
 mod tui;
 
-use crate::config::{ClientState, ClientStateParams, docs_path, state_path};
+use crate::config::{ClientState, ClientStateParams, FriendEntry, docs_path, state_path};
 use crate::device::describe_keys;
 use crate::hexutil::decode_hex32;
-use crate::rest::{DeviceEntry, PairingClaimResponse, PairingTicket, RestClient};
-use anyhow::{Context, Result, anyhow, bail};
+use crate::rest::{
+    DeviceEntry, FriendEntryPayload, PairingClaimResponse, PairingTicket, RestClient,
+};
+use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use commucat_crypto::DeviceKeyPair;
 use std::fs;
@@ -34,6 +36,8 @@ enum Command {
     Pair(PairArgs),
     #[command(subcommand)]
     Devices(DevicesCommand),
+    #[command(subcommand)]
+    Friends(FriendsCommand),
     Claim(ClaimArgs),
     Export,
     Docs(DocsArgs),
@@ -44,6 +48,15 @@ enum Command {
 enum DevicesCommand {
     List(DevicesListArgs),
     Revoke(DevicesRevokeArgs),
+}
+
+#[derive(Subcommand)]
+enum FriendsCommand {
+    List,
+    Add(FriendsAddArgs),
+    Remove(FriendsRemoveArgs),
+    Pull(FriendsSessionArgs),
+    Push(FriendsSessionArgs),
 }
 
 #[derive(Args)]
@@ -67,6 +80,8 @@ struct InitArgs {
     domain: String,
     #[arg(long)]
     username: Option<String>,
+    #[arg(long)]
+    user_id: Option<String>,
     #[arg(long)]
     display_name: Option<String>,
     #[arg(long)]
@@ -120,6 +135,36 @@ struct ClaimArgs {
 }
 
 #[derive(Args)]
+struct FriendsAddArgs {
+    #[arg()]
+    user_id: String,
+    #[arg(long)]
+    handle: Option<String>,
+    #[arg(long)]
+    alias: Option<String>,
+    #[arg(long)]
+    push: bool,
+    #[arg(long)]
+    session: Option<String>,
+}
+
+#[derive(Args)]
+struct FriendsRemoveArgs {
+    #[arg()]
+    user_id: String,
+    #[arg(long)]
+    session: Option<String>,
+    #[arg(long)]
+    push: bool,
+}
+
+#[derive(Args)]
+struct FriendsSessionArgs {
+    #[arg(long)]
+    session: Option<String>,
+}
+
+#[derive(Args)]
 struct DocsArgs {
     #[arg(long, default_value = "ru")]
     lang: String,
@@ -133,6 +178,7 @@ async fn main() -> Result<()> {
         Some(Command::Init(args)) => init_profile(args).await?,
         Some(Command::Pair(args)) => issue_pair(args).await?,
         Some(Command::Devices(cmd)) => handle_devices(cmd).await?,
+        Some(Command::Friends(cmd)) => handle_friends(cmd).await?,
         Some(Command::Claim(args)) => claim_device(args).await?,
         Some(Command::Export) => export_profile()?,
         Some(Command::Docs(args)) => print_docs(&args.lang)?,
@@ -155,6 +201,7 @@ async fn init_profile(args: InitArgs) -> Result<()> {
         server,
         domain,
         username,
+        user_id,
         display_name,
         avatar_url,
         device_id,
@@ -174,6 +221,9 @@ async fn init_profile(args: InitArgs) -> Result<()> {
     let path = state_path()?;
     if path.exists() && !force {
         bail!("профиль уже существует: {}", path.display());
+    }
+    if pair_code.is_none() && username.is_none() && user_id.is_none() {
+        bail!("укажите --username (для нового пользователя) или --user-id (для существующего)");
     }
     if let Some(code) = pair_code {
         let rest = RestClient::new(&server)?;
@@ -231,6 +281,7 @@ async fn init_profile(args: InitArgs) -> Result<()> {
             user_id: Some(claim.user.id.clone()),
             session_token: session.clone(),
             device_name: claim.device_name.clone().or(device_name),
+            friends: Vec::new(),
         });
         state.save()?;
         println!("state saved to {}", path.display());
@@ -242,7 +293,7 @@ async fn init_profile(args: InitArgs) -> Result<()> {
         return Ok(());
     }
 
-    let username = username.ok_or_else(|| anyhow!("--username обязателен без --pair-code"))?;
+    let handle_for_state = username.clone();
     let generated_device = device_id.unwrap_or_else(|| device::generate_device_id("device"));
     let keys = device::generate_keypair()?;
     let server_static_resolved = match server_static.clone() {
@@ -290,20 +341,23 @@ async fn init_profile(args: InitArgs) -> Result<()> {
         presence_state: presence,
         presence_interval_secs: presence_interval,
         traceparent,
-        user_handle: Some(username.clone()),
+        user_handle: handle_for_state,
         user_display_name: display_name.clone(),
         user_avatar_url: avatar_url.clone(),
-        user_id: None,
+        user_id: user_id.clone(),
         session_token: session.clone(),
         device_name,
+        friends: Vec::new(),
     });
     state.save()?;
     println!("state saved to {}", path.display());
     println!("{}", describe_keys(&generated_device, &keys));
-    println!(
-        "Устройство зарегистрируется автоматически при первом подключении как пользователь '{}'.",
-        username
-    );
+    if let Some(name) = username.as_ref() {
+        println!(
+            "Устройство зарегистрируется автоматически при первом подключении как пользователь '{}'.",
+            name
+        );
+    }
     if let Some(name) = display_name {
         println!("display_name={} (отправляется на сервер)", name);
     }
@@ -358,6 +412,87 @@ async fn handle_devices(command: DevicesCommand) -> Result<()> {
     match command {
         DevicesCommand::List(args) => list_devices(args).await,
         DevicesCommand::Revoke(args) => revoke_device(args).await,
+    }
+}
+
+async fn handle_friends(command: FriendsCommand) -> Result<()> {
+    match command {
+        FriendsCommand::List => {
+            let state = ClientState::load()?;
+            if state.friends().is_empty() {
+                println!("Список друзей пуст.");
+            } else {
+                for entry in state.friends() {
+                    let handle = entry
+                        .alias
+                        .as_ref()
+                        .or(entry.handle.as_ref())
+                        .map(|s| format!(" ({})", s))
+                        .unwrap_or_default();
+                    println!("{}{}", entry.user_id, handle);
+                }
+            }
+            Ok(())
+        }
+        FriendsCommand::Add(args) => {
+            let mut state = ClientState::load()?;
+            let entry = FriendEntry {
+                user_id: args.user_id.clone(),
+                handle: args.handle.clone(),
+                alias: args.alias.clone(),
+            };
+            state.upsert_friend(entry);
+            state.save()?;
+            println!("Добавлен друг {}", args.user_id);
+            if args.push {
+                let session = resolve_session(args.session.as_deref(), &state)?;
+                let rest = RestClient::new(&state.server_url)?;
+                rest.update_friends(&session, &friends_to_payload(state.friends()))
+                    .await?;
+                println!("Список друзей синхронизирован.");
+            }
+            Ok(())
+        }
+        FriendsCommand::Remove(args) => {
+            let mut state = ClientState::load()?;
+            if state.remove_friend(&args.user_id) {
+                state.save()?;
+                println!("Удалён друг {}", args.user_id);
+                if args.push {
+                    let session = resolve_session(args.session.as_deref(), &state)?;
+                    let rest = RestClient::new(&state.server_url)?;
+                    rest.update_friends(&session, &friends_to_payload(state.friends()))
+                        .await?;
+                    println!("Список друзей синхронизирован.");
+                }
+            } else {
+                println!("Друг {} не найден", args.user_id);
+            }
+            Ok(())
+        }
+        FriendsCommand::Pull(args) => {
+            let mut state = ClientState::load()?;
+            let session = resolve_session(args.session.as_deref(), &state)?;
+            let rest = RestClient::new(&state.server_url)?;
+            let remote = rest.list_friends(&session).await?;
+            let entries = remote
+                .into_iter()
+                .map(friend_from_payload)
+                .collect::<Vec<_>>();
+            state.set_friends(entries);
+            state.save()?;
+            println!("Загружено друзей: {}", state.friends().len());
+            Ok(())
+        }
+        FriendsCommand::Push(args) => {
+            let state = ClientState::load()?;
+            let session = resolve_session(args.session.as_deref(), &state)?;
+            let rest = RestClient::new(&state.server_url)?;
+            rest.update_friends(&session, &friends_to_payload(state.friends()))
+                .await?;
+            println!("Список друзей синхронизирован.");
+            Ok(())
+        }
     }
 }
 
@@ -428,6 +563,25 @@ async fn claim_device(args: ClaimArgs) -> Result<()> {
         println!("state обновлён в {}", state_path()?.display());
     }
     Ok(())
+}
+
+fn friend_from_payload(payload: FriendEntryPayload) -> FriendEntry {
+    FriendEntry {
+        user_id: payload.user_id,
+        handle: payload.handle,
+        alias: payload.alias,
+    }
+}
+
+fn friends_to_payload(entries: &[FriendEntry]) -> Vec<FriendEntryPayload> {
+    entries
+        .iter()
+        .map(|entry| FriendEntryPayload {
+            user_id: entry.user_id.clone(),
+            handle: entry.handle.clone(),
+            alias: entry.alias.clone(),
+        })
+        .collect()
 }
 
 fn resolve_session(explicit: Option<&str>, state: &ClientState) -> Result<String> {

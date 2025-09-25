@@ -1,7 +1,7 @@
-use crate::config::ClientState;
+use crate::config::{ClientState, FriendEntry};
 use crate::engine::{ClientEvent, EngineCommand, EngineHandle, create_engine};
 use crate::hexutil::encode_hex;
-use crate::rest::{DeviceEntry, PairingTicket, RestClient};
+use crate::rest::{DeviceEntry, FriendEntryPayload, PairingTicket, RestClient};
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Utc};
 use commucat_proto::{ControlEnvelope, Frame as ProtoFrame, FramePayload, FrameType};
@@ -308,6 +308,32 @@ impl App {
                 }
                 other => self.record_system(format!("неизвестная подкоманда devices: {}", other)),
             },
+            "friends" => {
+                let sub = parts.next().unwrap_or("list").to_lowercase();
+                match sub.as_str() {
+                    "list" => self.friends_list_command(),
+                    "add" => {
+                        let user_id = parts
+                            .next()
+                            .ok_or_else(|| anyhow!("укажите user_id"))?
+                            .to_string();
+                        let alias = parts.next().map(|s| s.to_string());
+                        self.friends_add_command(user_id, alias).await?;
+                    }
+                    "remove" => {
+                        let user_id = parts
+                            .next()
+                            .ok_or_else(|| anyhow!("укажите user_id"))?
+                            .to_string();
+                        self.friends_remove_command(user_id).await?;
+                    }
+                    "push" => self.friends_push_command().await?,
+                    "pull" => self.friends_pull_command().await?,
+                    other => {
+                        self.record_system(format!("неизвестная подкоманда friends: {}", other))
+                    }
+                }
+            }
             "revoke" => {
                 let target = parts.next().ok_or_else(|| anyhow!("укажите device_id"))?;
                 self.devices_revoke_command(target).await?;
@@ -443,6 +469,72 @@ impl App {
         Ok(())
     }
 
+    fn friends_list_command(&mut self) {
+        if self.state.friends().is_empty() {
+            self.record_system("Список друзей пуст.".to_string());
+        } else {
+            let entries = self.state.friends().to_vec();
+            for entry in entries {
+                let handle = entry
+                    .alias
+                    .as_ref()
+                    .or(entry.handle.as_ref())
+                    .map(|s| format!(" ({})", s))
+                    .unwrap_or_default();
+                self.record_system(format!("{}{}", entry.user_id, handle));
+            }
+        }
+    }
+
+    async fn friends_add_command(&mut self, user_id: String, alias: Option<String>) -> Result<()> {
+        let entry = FriendEntry {
+            user_id: user_id.clone(),
+            handle: None,
+            alias,
+        };
+        self.state.upsert_friend(entry);
+        if let Err(err) = self.state.save() {
+            self.record_system(format!("не удалось сохранить профиль: {}", err));
+        }
+        self.record_system(format!("Добавлен друг {}", user_id));
+        Ok(())
+    }
+
+    async fn friends_remove_command(&mut self, user_id: String) -> Result<()> {
+        if self.state.remove_friend(&user_id) {
+            if let Err(err) = self.state.save() {
+                self.record_system(format!("не удалось сохранить профиль: {}", err));
+            }
+            self.record_system(format!("Удалён друг {}", user_id));
+        } else {
+            self.record_system(format!("Друг {} не найден", user_id));
+        }
+        Ok(())
+    }
+
+    async fn friends_push_command(&mut self) -> Result<()> {
+        let client = self.rest_client()?;
+        let session = self.resolve_session_token()?;
+        client
+            .update_friends(&session, &tui_friends_to_payload(self.state.friends()))
+            .await?;
+        self.record_system("Список друзей синхронизирован.".to_string());
+        Ok(())
+    }
+
+    async fn friends_pull_command(&mut self) -> Result<()> {
+        let client = self.rest_client()?;
+        let session = self.resolve_session_token()?;
+        let remote = client.list_friends(&session).await?;
+        let entries = remote.into_iter().map(tui_friend_from_payload).collect();
+        self.state.set_friends(entries);
+        if let Err(err) = self.state.save() {
+            self.record_system(format!("не удалось сохранить профиль: {}", err));
+        }
+        self.record_system(format!("Загружено друзей: {}", self.state.friends().len()));
+        Ok(())
+    }
+
     fn rest_client(&self) -> Result<RestClient> {
         RestClient::new(&self.state.server_url)
     }
@@ -530,7 +622,7 @@ impl App {
     }
 
     fn show_help(&mut self) {
-        self.record_system("Команды: :connect, :disconnect, :join <id> <members>, :relay <id> <members>, :leave <id>, :channel <id>, :presence <state>, :pair [ttl], :devices [list|revoke <id>], :export, :clear, :quit".to_string());
+        self.record_system("Команды: :connect, :disconnect, :join <id> <members>, :relay <id> <members>, :leave <id>, :channel <id>, :presence <state>, :pair [ttl], :devices [list|revoke <id>], :friends [list|add <id> [alias]|remove <id>|pull|push], :export, :clear, :quit".to_string());
     }
 
     fn clear_messages(&mut self) {
@@ -792,4 +884,23 @@ fn set_cursor(
         terminal.set_cursor(x, y).context("set cursor")?;
     }
     Ok(())
+}
+
+fn tui_friend_from_payload(payload: FriendEntryPayload) -> FriendEntry {
+    FriendEntry {
+        user_id: payload.user_id,
+        handle: payload.handle,
+        alias: payload.alias,
+    }
+}
+
+fn tui_friends_to_payload(entries: &[FriendEntry]) -> Vec<FriendEntryPayload> {
+    entries
+        .iter()
+        .map(|entry| FriendEntryPayload {
+            user_id: entry.user_id.clone(),
+            handle: entry.handle.clone(),
+            alias: entry.alias.clone(),
+        })
+        .collect()
 }
