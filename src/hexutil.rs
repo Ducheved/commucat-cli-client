@@ -51,6 +51,22 @@ fn decode_digit(value: u8) -> Result<u8> {
     }
 }
 
+pub fn short_hex(value: &str) -> String {
+    let trimmed = value.trim();
+    let len = trimmed.len();
+    const MAX_LEN: usize = 16;
+    const EDGE: usize = 8;
+    if len <= MAX_LEN {
+        return trimmed.to_string();
+    }
+    if len <= EDGE {
+        return trimmed.to_string();
+    }
+    let start = &trimmed[..EDGE];
+    let end = &trimmed[len.saturating_sub(EDGE)..];
+    format!("{}…{}", start, end)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -68,5 +84,16 @@ mod tests {
         let encoded = "00".repeat(32);
         let decoded = decode_hex32(&encoded).unwrap();
         assert_eq!(decoded, [0u8; 32]);
+    }
+
+    #[test]
+    fn short_hex_returns_small_values() {
+        assert_eq!(short_hex("deadbeef"), "deadbeef");
+    }
+
+    #[test]
+    fn short_hex_truncates_long_values() {
+        let value = "0123456789abcdef0123456789abcdef";
+        assert_eq!(short_hex(value), "01234567…89abcdef");
     }
 }

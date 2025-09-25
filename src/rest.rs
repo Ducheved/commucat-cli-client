@@ -3,6 +3,7 @@ use commucat_crypto::DeviceCertificate;
 use reqwest::{Client, StatusCode, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
 
 #[derive(Clone)]
 pub struct RestClient {
@@ -82,6 +83,24 @@ impl RestClient {
             .context("request /api/devices")?;
         let envelope: DevicesEnvelope = Self::parse_response(response, StatusCode::OK).await?;
         Ok(envelope.devices)
+    }
+
+    pub async fn p2p_assist(
+        &self,
+        session: &str,
+        request: &P2pAssistRequest,
+    ) -> Result<P2pAssistResponse> {
+        let mut endpoint = self.base.clone();
+        endpoint.set_path("api/p2p/assist");
+        let response = self
+            .client
+            .post(endpoint)
+            .bearer_auth(session)
+            .json(request)
+            .send()
+            .await
+            .context("request /api/p2p/assist")?;
+        Self::parse_response(response, StatusCode::OK).await
     }
 
     pub async fn list_friends(&self, session: &str) -> Result<Vec<FriendEntryPayload>> {
@@ -239,6 +258,119 @@ pub struct ServerPairingInfo {
     pub pairing_ttl: i64,
     #[serde(default)]
     pub max_auto_devices: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct P2pAssistRequest {
+    #[serde(default)]
+    pub peer_hint: Option<String>,
+    #[serde(default)]
+    pub paths: Vec<AssistPathHint>,
+    #[serde(default)]
+    pub prefer_reality: Option<bool>,
+    #[serde(default)]
+    pub fec: Option<AssistFecHint>,
+    #[serde(default)]
+    pub min_paths: Option<usize>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct AssistPathHint {
+    #[serde(default)]
+    pub address: Option<String>,
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub port: Option<u16>,
+    #[serde(default)]
+    pub server_name: Option<String>,
+    #[serde(default)]
+    pub priority: Option<u8>,
+    #[serde(default)]
+    pub reality_fingerprint: Option<String>,
+    #[serde(default)]
+    pub reality_pem: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct AssistFecHint {
+    #[serde(default)]
+    pub mtu: Option<u16>,
+    #[serde(default)]
+    pub repair_overhead: Option<f32>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct P2pAssistResponse {
+    pub noise: NoiseAdvice,
+    pub pq: PqAdvice,
+    pub transports: Vec<TransportAdvice>,
+    pub multipath: MultipathAdvice,
+    pub obfuscation: ObfuscationAdvice,
+    pub security: SecuritySnapshot,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct NoiseAdvice {
+    pub pattern: String,
+    pub prologue_hex: String,
+    pub device_seed_hex: String,
+    pub static_public_hex: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct PqAdvice {
+    pub identity_public_hex: String,
+    pub signed_prekey_public_hex: String,
+    pub kem_public_hex: String,
+    pub signature_public_hex: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct TransportAdvice {
+    pub path_id: String,
+    pub transport: String,
+    pub resistance: String,
+    pub latency: String,
+    pub throughput: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct MultipathAdvice {
+    pub fec_mtu: u16,
+    pub fec_overhead: f32,
+    #[serde(default)]
+    pub primary_path: Option<String>,
+    #[serde(default)]
+    pub sample_segments: HashMap<String, SampleBreakdown>,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct SampleBreakdown {
+    pub total: usize,
+    pub repair: usize,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct ObfuscationAdvice {
+    #[serde(default)]
+    pub reality_fingerprint_hex: Option<String>,
+    #[serde(default)]
+    pub domain_fronting: bool,
+    #[serde(default)]
+    pub protocol_mimicry: bool,
+    #[serde(default)]
+    pub tor_bridge: bool,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct SecuritySnapshot {
+    pub noise_handshakes: u64,
+    pub pq_handshakes: u64,
+    pub fec_packets: u64,
+    pub multipath_sessions: u64,
+    pub average_paths: f64,
+    pub censorship_deflections: u64,
 }
 
 #[allow(dead_code)]

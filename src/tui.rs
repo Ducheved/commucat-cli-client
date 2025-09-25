@@ -1,7 +1,10 @@
 use crate::config::{ClientState, FriendEntry};
 use crate::engine::{ClientEvent, EngineCommand, EngineHandle, create_engine};
-use crate::hexutil::encode_hex;
-use crate::rest::{DeviceEntry, FriendEntryPayload, PairingTicket, RestClient};
+use crate::hexutil::{encode_hex, short_hex};
+use crate::rest::{
+    DeviceEntry, FriendEntryPayload, P2pAssistRequest, P2pAssistResponse, PairingTicket,
+    RestClient, ServerInfo,
+};
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Utc};
 use commucat_proto::{ControlEnvelope, Frame as ProtoFrame, FramePayload, FrameType};
@@ -14,7 +17,7 @@ use futures::StreamExt;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::{Frame as UiFrame, Terminal};
 use std::collections::VecDeque;
@@ -25,6 +28,34 @@ use tokio::sync::mpsc::Receiver;
 const ENGINE_COMMAND_BUFFER: usize = 128;
 const ENGINE_EVENT_BUFFER: usize = 256;
 const MESSAGE_HISTORY_LIMIT: usize = 200;
+const DEFAULT_PAIR_TTL: i64 = 300;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AppView {
+    Chat,
+    Devices,
+    Friends,
+    Pairing,
+    Info,
+    Assist,
+}
+
+const MENU_ITEMS: &[(AppView, &str)] = &[
+    (AppView::Chat, "Чат"),
+    (AppView::Devices, "Устройства"),
+    (AppView::Friends, "Друзья"),
+    (AppView::Pairing, "Pairing"),
+    (AppView::Info, "Сервер"),
+    (AppView::Assist, "P2P Assist"),
+];
+
+fn default_assist_request() -> P2pAssistRequest {
+    P2pAssistRequest {
+        prefer_reality: Some(true),
+        min_paths: Some(2),
+        ..P2pAssistRequest::default()
+    }
+}
 
 pub async fn run_tui(state: ClientState) -> Result<()> {
     let (engine, events) = create_engine(ENGINE_COMMAND_BUFFER, ENGINE_EVENT_BUFFER);
@@ -67,11 +98,22 @@ struct App {
     active_channel: usize,
     pending_disconnect: bool,
     last_error: Option<String>,
+    view: AppView,
+    menu_state: ListState,
+    devices: Vec<DeviceEntry>,
+    devices_state: ListState,
+    friends_state: ListState,
+    pairing_ticket: Option<PairingTicket>,
+    server_info: Option<ServerInfo>,
+    assist_report: Option<P2pAssistResponse>,
+    assist_request: P2pAssistRequest,
 }
 
 impl App {
     fn new(state: ClientState, engine: EngineHandle, events: Receiver<ClientEvent>) -> Self {
         let channels = vec![ChannelView::system()];
+        let mut menu_state = ListState::default();
+        menu_state.select(Some(0));
         App {
             state,
             engine,
@@ -85,6 +127,15 @@ impl App {
             active_channel: 0,
             pending_disconnect: false,
             last_error: None,
+            view: AppView::Chat,
+            menu_state,
+            devices: Vec::new(),
+            devices_state: ListState::default(),
+            friends_state: ListState::default(),
+            pairing_ticket: None,
+            server_info: None,
+            assist_report: None,
+            assist_request: default_assist_request(),
         }
     }
 
@@ -93,15 +144,64 @@ impl App {
             KeyEventKind::Press | KeyEventKind::Repeat => {}
             KeyEventKind::Release => return Ok(()),
         }
-        if matches!(key.modifiers, KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.should_quit = true;
             return Ok(());
         }
+        if let KeyCode::F(n) = key.code {
+            match n {
+                1 => self.set_view(AppView::Chat),
+                2 => self.set_view(AppView::Devices),
+                3 => self.set_view(AppView::Friends),
+                4 => self.set_view(AppView::Pairing),
+                5 => self.set_view(AppView::Info),
+                6 => self.set_view(AppView::Assist),
+                10 => self.should_quit = true,
+                _ => {}
+            }
+            return Ok(());
+        }
         match key.code {
+            KeyCode::BackTab => {
+                self.cycle_view_backward();
+            }
+            KeyCode::Tab => {
+                if self.view == AppView::Chat {
+                    self.select_next_channel();
+                } else {
+                    self.cycle_view_forward();
+                }
+            }
+            KeyCode::Left => {
+                self.cycle_view_backward();
+            }
+            KeyCode::Right => {
+                self.cycle_view_forward();
+            }
+            KeyCode::Up => {
+                if self.view == AppView::Chat {
+                    self.select_previous_channel();
+                } else {
+                    self.navigate_view_list(-1);
+                }
+            }
+            KeyCode::Down => {
+                if self.view == AppView::Chat {
+                    self.select_next_channel();
+                } else {
+                    self.navigate_view_list(1);
+                }
+            }
             KeyCode::Char(':') if self.input.is_empty() => {
                 self.input.push(':');
             }
             KeyCode::Char(ch) => {
+                if key.modifiers.is_empty()
+                    && self.input.is_empty()
+                    && self.handle_hotkey(ch).await?
+                {
+                    return Ok(());
+                }
                 if !matches!(key.modifiers, KeyModifiers::CONTROL | KeyModifiers::ALT) {
                     self.input.push(ch);
                 }
@@ -110,25 +210,45 @@ impl App {
                 self.input.pop();
             }
             KeyCode::Enter => {
-                let command = self.input.trim().to_string();
-                self.input.clear();
-                if let Some(stripped) = command.strip_prefix(':') {
-                    self.execute_command(stripped).await?;
-                } else if !command.is_empty() {
-                    self.send_text(command).await?;
-                }
+                self.process_enter().await?;
             }
             KeyCode::Esc => {
                 self.input.clear();
             }
-            KeyCode::Tab => self.select_next_channel(),
-            KeyCode::Up => self.select_previous_channel(),
             KeyCode::F(10) => {
                 self.should_quit = true;
             }
             _ => {}
         }
         Ok(())
+    }
+
+    fn set_view(&mut self, view: AppView) {
+        self.view = view;
+        if let Some(index) = MENU_ITEMS.iter().position(|(item, _)| *item == view) {
+            self.menu_state.select(Some(index));
+        }
+        match view {
+            AppView::Devices => self.update_devices_state(),
+            AppView::Friends => self.sync_friend_state(),
+            _ => {}
+        }
+    }
+
+    fn cycle_view_forward(&mut self) {
+        let current = self.menu_state.selected().unwrap_or(0);
+        let next = (current + 1) % MENU_ITEMS.len();
+        self.set_view(MENU_ITEMS[next].0);
+    }
+
+    fn cycle_view_backward(&mut self) {
+        let current = self.menu_state.selected().unwrap_or(0);
+        let next = if current == 0 {
+            MENU_ITEMS.len() - 1
+        } else {
+            current - 1
+        };
+        self.set_view(MENU_ITEMS[next].0);
     }
 
     async fn handle_client_event(&mut self, event: ClientEvent) -> Result<()> {
@@ -241,6 +361,17 @@ impl App {
             }
             FrameType::GroupEvent | FrameType::GroupInvite | FrameType::GroupCreate => {
                 self.record_system(format!("group event {}", frame.channel_id));
+            }
+            other @ (FrameType::CallOffer
+            | FrameType::CallAnswer
+            | FrameType::CallEnd
+            | FrameType::CallStats
+            | FrameType::VoiceFrame
+            | FrameType::VideoFrame) => {
+                self.record_system(format!(
+                    "получен {:?} для канала {}",
+                    other, frame.channel_id
+                ));
             }
             FrameType::Typing => {}
             FrameType::Hello | FrameType::Auth => {}
@@ -442,6 +573,7 @@ impl App {
         let client = self.rest_client()?;
         let session = self.resolve_session_token()?;
         let ticket = client.create_pairing(&session, ttl).await?;
+        self.pairing_ticket = Some(ticket.clone());
         self.state.last_pairing_code = Some(ticket.pair_code.clone());
         self.state.last_pairing_expires_at = Some(ticket.expires_at.clone());
         self.state.last_pairing_issuer_device_id = ticket.issuer_device_id.clone();
@@ -502,6 +634,7 @@ impl App {
         if let Err(err) = self.state.save() {
             self.record_system(format!("не удалось сохранить профиль: {}", err));
         }
+        self.sync_friend_state();
         self.record_system(format!("Добавлен друг {}", user_id));
         Ok(())
     }
@@ -511,6 +644,7 @@ impl App {
             if let Err(err) = self.state.save() {
                 self.record_system(format!("не удалось сохранить профиль: {}", err));
             }
+            self.sync_friend_state();
             self.record_system(format!("Удалён друг {}", user_id));
         } else {
             self.record_system(format!("Друг {} не найден", user_id));
@@ -537,12 +671,275 @@ impl App {
         if let Err(err) = self.state.save() {
             self.record_system(format!("не удалось сохранить профиль: {}", err));
         }
+        self.sync_friend_state();
         self.record_system(format!("Загружено друзей: {}", self.state.friends().len()));
         Ok(())
     }
 
     fn rest_client(&self) -> Result<RestClient> {
         RestClient::new(&self.state.server_url)
+    }
+
+    fn navigate_view_list(&mut self, delta: isize) {
+        match self.view {
+            AppView::Chat | AppView::Pairing | AppView::Info | AppView::Assist => {}
+            AppView::Devices => self.move_device_selection(delta),
+            AppView::Friends => self.move_friend_selection(delta),
+        }
+    }
+
+    fn move_device_selection(&mut self, delta: isize) {
+        if self.devices.is_empty() {
+            self.devices_state.select(None);
+            return;
+        }
+        let len = self.devices.len();
+        let current = self.devices_state.selected().unwrap_or(0);
+        let mut next = current as isize + delta;
+        if next < 0 {
+            next = 0;
+        }
+        if next >= len as isize {
+            next = (len - 1) as isize;
+        }
+        self.devices_state.select(Some(next as usize));
+    }
+
+    fn move_friend_selection(&mut self, delta: isize) {
+        let friends = self.state.friends();
+        if friends.is_empty() {
+            self.friends_state.select(None);
+            return;
+        }
+        let len = friends.len();
+        let current = self.friends_state.selected().unwrap_or(0);
+        let mut next = current as isize + delta;
+        if next < 0 {
+            next = 0;
+        }
+        if next >= len as isize {
+            next = (len - 1) as isize;
+        }
+        self.friends_state.select(Some(next as usize));
+    }
+
+    fn update_devices_state(&mut self) {
+        if self.devices.is_empty() {
+            self.devices_state.select(None);
+        } else {
+            let len = self.devices.len();
+            let index = self.devices_state.selected().unwrap_or(0).min(len - 1);
+            self.devices_state.select(Some(index));
+        }
+    }
+
+    fn sync_friend_state(&mut self) {
+        let friends = self.state.friends();
+        if friends.is_empty() {
+            self.friends_state.select(None);
+        } else {
+            let index = self
+                .friends_state
+                .selected()
+                .unwrap_or(0)
+                .min(friends.len() - 1);
+            self.friends_state.select(Some(index));
+        }
+    }
+
+    async fn handle_hotkey(&mut self, ch: char) -> Result<bool> {
+        match (self.view, ch) {
+            (AppView::Devices, 'r') => {
+                self.refresh_devices().await?;
+                Ok(true)
+            }
+            (AppView::Devices, 'v') => {
+                self.devices_revoke_selected().await?;
+                Ok(true)
+            }
+            (AppView::Devices, 'i') => {
+                self.inspect_selected_device();
+                Ok(true)
+            }
+            (AppView::Friends, 'r') => {
+                self.friends_pull_command().await?;
+                Ok(true)
+            }
+            (AppView::Friends, 'p') => {
+                self.friends_push_command().await?;
+                Ok(true)
+            }
+            (AppView::Friends, 'd') => {
+                self.remove_selected_friend().await?;
+                Ok(true)
+            }
+            (AppView::Pairing, 'g') => {
+                self.issue_pair_command(Some(DEFAULT_PAIR_TTL)).await?;
+                Ok(true)
+            }
+            (AppView::Info, 'r') => {
+                self.refresh_server_info().await?;
+                Ok(true)
+            }
+            (AppView::Assist, 'r') => {
+                self.refresh_assist().await?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    async fn process_enter(&mut self) -> Result<()> {
+        let command = self.input.trim().to_string();
+        self.input.clear();
+        if let Some(stripped) = command.strip_prefix(':') {
+            self.execute_command(stripped).await?;
+            return Ok(());
+        }
+        if command.is_empty() {
+            self.handle_enter_on_view().await?;
+            return Ok(());
+        }
+        if self.view == AppView::Chat {
+            self.send_text(command).await?;
+        } else {
+            self.record_system(
+                "Текстовый ввод доступен только в режиме чата (начните команду с ':')".to_string(),
+            );
+        }
+        Ok(())
+    }
+
+    async fn handle_enter_on_view(&mut self) -> Result<()> {
+        match self.view {
+            AppView::Devices => {
+                self.inspect_selected_device();
+            }
+            AppView::Friends => {
+                self.inspect_selected_friend();
+            }
+            AppView::Pairing => {
+                self.show_pairing_snapshot();
+            }
+            AppView::Info => {
+                if self.server_info.is_none() {
+                    self.refresh_server_info().await?;
+                }
+            }
+            AppView::Assist => {
+                if self.assist_report.is_none() {
+                    self.refresh_assist().await?;
+                }
+            }
+            AppView::Chat => {}
+        }
+        Ok(())
+    }
+
+    async fn refresh_devices(&mut self) -> Result<()> {
+        let client = self.rest_client()?;
+        let session = self.resolve_session_token()?;
+        let devices = client.list_devices(&session).await?;
+        let count = devices.len();
+        self.devices = devices;
+        self.update_devices_state();
+        self.record_system(format!("Получено устройств: {}", count));
+        Ok(())
+    }
+
+    async fn devices_revoke_selected(&mut self) -> Result<()> {
+        let Some(device) = self.selected_device().cloned() else {
+            self.record_system("Выберите устройство для отзыва (стрелки вверх/вниз)".to_string());
+            return Ok(());
+        };
+        let client = self.rest_client()?;
+        let session = self.resolve_session_token()?;
+        client.revoke_device(&session, &device.device_id).await?;
+        self.record_system(format!(
+            "Устройство {} отмечено как revoked",
+            device.device_id
+        ));
+        self.refresh_devices().await
+    }
+
+    async fn remove_selected_friend(&mut self) -> Result<()> {
+        let Some(friend) = self.selected_friend().cloned() else {
+            self.record_system("Список друзей пуст".to_string());
+            return Ok(());
+        };
+        self.friends_remove_command(friend.user_id).await?;
+        self.sync_friend_state();
+        Ok(())
+    }
+
+    async fn refresh_server_info(&mut self) -> Result<()> {
+        let client = self.rest_client()?;
+        let info = client.server_info().await?;
+        self.server_info = Some(info.clone());
+        self.record_system(format!("Информация сервера обновлена для {}", info.domain));
+        Ok(())
+    }
+
+    async fn refresh_assist(&mut self) -> Result<()> {
+        let client = self.rest_client()?;
+        let session = self.resolve_session_token()?;
+        let report = client.p2p_assist(&session, &self.assist_request).await?;
+        self.assist_report = Some(report);
+        self.record_system("Получены рекомендации P2P assist".to_string());
+        Ok(())
+    }
+
+    fn inspect_selected_device(&mut self) {
+        if let Some(device) = self.selected_device().cloned() {
+            self.record_system(format!(
+                "{}: status={}, created={}, current={}",
+                device.device_id, device.status, device.created_at, device.current
+            ));
+            self.record_system(format!("pubkey: {}", device.public_key));
+        } else {
+            self.record_system("Нет устройств для отображения".to_string());
+        }
+    }
+
+    fn inspect_selected_friend(&mut self) {
+        if let Some(friend) = self.selected_friend().cloned() {
+            let alias = friend
+                .alias
+                .as_deref()
+                .or(friend.handle.as_deref())
+                .unwrap_or("-");
+            self.record_system(format!("{} (alias: {})", friend.user_id, alias));
+        } else {
+            self.record_system("Нет друзей для отображения".to_string());
+        }
+    }
+
+    fn show_pairing_snapshot(&mut self) {
+        if let Some(ticket) = self.pairing_ticket.clone() {
+            self.record_pairing_ticket(&ticket);
+            return;
+        }
+        match (
+            &self.state.last_pairing_code,
+            &self.state.last_pairing_expires_at,
+        ) {
+            (Some(code), Some(expiry)) => {
+                self.record_system(format!("Последний код: {} (истекает {})", code, expiry));
+            }
+            _ => self.record_system("Pairing кодов ещё не создавалось".to_string()),
+        }
+    }
+
+    fn selected_device(&self) -> Option<&DeviceEntry> {
+        self.devices_state
+            .selected()
+            .and_then(|index| self.devices.get(index))
+    }
+
+    fn selected_friend(&self) -> Option<&FriendEntry> {
+        self.friends_state
+            .selected()
+            .and_then(|index| self.state.friends().get(index))
     }
 
     fn resolve_session_token(&self) -> Result<String> {
@@ -668,7 +1065,47 @@ impl App {
         frame.render_widget(paragraph, area);
     }
 
-    fn render_body(&self, frame: &mut UiFrame, area: Rect) {
+    fn render_body(&mut self, frame: &mut UiFrame, area: Rect) {
+        let chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Length(20), Constraint::Min(10)])
+            .split(area);
+        self.render_menu(frame, chunks[0]);
+        self.render_view(frame, chunks[1]);
+    }
+
+    fn render_menu(&mut self, frame: &mut UiFrame, area: Rect) {
+        let items = MENU_ITEMS
+            .iter()
+            .map(|(_, label)| ListItem::new(*label))
+            .collect::<Vec<_>>();
+        let block = Block::default()
+            .title("Разделы")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Blue));
+        let list = List::new(items)
+            .block(block)
+            .highlight_style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol("› ");
+        frame.render_stateful_widget(list, area, &mut self.menu_state);
+    }
+
+    fn render_view(&mut self, frame: &mut UiFrame, area: Rect) {
+        match self.view {
+            AppView::Chat => self.render_chat(frame, area),
+            AppView::Devices => self.render_devices(frame, area),
+            AppView::Friends => self.render_friends(frame, area),
+            AppView::Pairing => self.render_pairing(frame, area),
+            AppView::Info => self.render_info(frame, area),
+            AppView::Assist => self.render_assist(frame, area),
+        }
+    }
+
+    fn render_chat(&mut self, frame: &mut UiFrame, area: Rect) {
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Length(28), Constraint::Min(10)])
@@ -744,12 +1181,335 @@ impl App {
         frame.render_widget(paragraph, area);
     }
 
-    fn render_input(&self, frame: &mut UiFrame, area: Rect) {
+    fn render_devices(&mut self, frame: &mut UiFrame, area: Rect) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(6), Constraint::Length(6)])
+            .split(area);
+        let items = if self.devices.is_empty() {
+            vec![ListItem::new(
+                "Нажмите r, чтобы загрузить устройства".to_string(),
+            )]
+        } else {
+            self.devices
+                .iter()
+                .map(|device| {
+                    let label = format!(
+                        "{} [{}]{}",
+                        device.device_id,
+                        device.status,
+                        if device.current { " *" } else { "" }
+                    );
+                    ListItem::new(label)
+                })
+                .collect::<Vec<_>>()
+        };
         let block = Block::default()
-            .title("Ввод")
+            .title("Устройства (r – обновить, v – отозвать, Enter/i – детали)")
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Blue));
-        let paragraph = Paragraph::new(self.input.clone())
+        let list = List::new(items)
+            .block(block)
+            .highlight_style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol("› ");
+        frame.render_stateful_widget(list, chunks[0], &mut self.devices_state);
+
+        let mut lines = Vec::new();
+        if let Some(device) = self.selected_device() {
+            lines.push(Line::from(format!("ID: {}", device.device_id)));
+            lines.push(Line::from(format!("Статус: {}", device.status)));
+            lines.push(Line::from(format!("Создано: {}", device.created_at)));
+            lines.push(Line::from(if device.current {
+                "Текущее устройство: да"
+            } else {
+                "Текущее устройство: нет"
+            }));
+            lines.push(Line::from(format!(
+                "Публичный ключ: {}",
+                short_hex(&device.public_key)
+            )));
+        } else {
+            lines.push(Line::from("Нет устройств. Нажмите r для синхронизации."));
+        }
+        let detail = Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .title("Детали")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Blue)),
+            )
+            .wrap(Wrap { trim: true });
+        frame.render_widget(detail, chunks[1]);
+    }
+
+    fn render_friends(&mut self, frame: &mut UiFrame, area: Rect) {
+        let friends = self.state.friends();
+        let items = if friends.is_empty() {
+            vec![ListItem::new(
+                "Используйте :friends add <id> или нажмите r для загрузки".to_string(),
+            )]
+        } else {
+            friends
+                .iter()
+                .map(|friend| {
+                    let alias = friend
+                        .alias
+                        .as_deref()
+                        .or(friend.handle.as_deref())
+                        .unwrap_or("-");
+                    ListItem::new(format!("{} ({})", friend.user_id, alias))
+                })
+                .collect::<Vec<_>>()
+        };
+        let block = Block::default()
+            .title("Друзья (r – загрузить, p – отправить, d – удалить, Enter – детали)")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Blue));
+        let list = List::new(items)
+            .block(block)
+            .highlight_style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol("› ");
+        frame.render_stateful_widget(list, area, &mut self.friends_state);
+    }
+
+    fn render_pairing(&mut self, frame: &mut UiFrame, area: Rect) {
+        let mut lines = Vec::new();
+        if let Some(ticket) = self.pairing_ticket.as_ref() {
+            lines.push(Line::from(format!("Код: {}", ticket.pair_code)));
+            lines.push(Line::from(format!(
+                "Действителен до: {}",
+                ticket.expires_at
+            )));
+            if let Some(issuer) = ticket.issuer_device_id.as_deref() {
+                lines.push(Line::from(format!("Выдан: {}", issuer)));
+            }
+            lines.push(Line::from(format!("Seed: {}", ticket.device_seed)));
+        } else {
+            match (
+                &self.state.last_pairing_code,
+                &self.state.last_pairing_expires_at,
+            ) {
+                (Some(code), Some(expiry)) => {
+                    lines.push(Line::from(format!("Последний код: {}", code)));
+                    lines.push(Line::from(format!("Истекает: {}", expiry)));
+                }
+                _ => lines.push(Line::from("Код ещё не выпускался.")),
+            }
+        }
+        lines.push(Line::from(
+            "g – создать код (TTL 300s) · Enter – показать текущий",
+        ));
+        let paragraph = Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .title("Pairing")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Blue)),
+            )
+            .wrap(Wrap { trim: true });
+        frame.render_widget(paragraph, area);
+    }
+
+    fn render_info(&mut self, frame: &mut UiFrame, area: Rect) {
+        let mut lines = Vec::new();
+        if let Some(info) = self.server_info.as_ref() {
+            lines.push(Line::from(format!("Домен: {}", info.domain)));
+            lines.push(Line::from(format!(
+                "Noise static: {}",
+                short_hex(&info.noise_public)
+            )));
+            if let Some(ca) = info.device_ca_public.as_deref() {
+                lines.push(Line::from(format!("Device CA: {}", short_hex(ca))));
+            }
+            if !info.supported_patterns.is_empty() {
+                lines.push(Line::from(format!(
+                    "Noise patterns: {}",
+                    info.supported_patterns.join(", ")
+                )));
+            }
+            if !info.supported_versions.is_empty() {
+                lines.push(Line::from(format!(
+                    "Protocol versions: {:?}",
+                    info.supported_versions
+                )));
+            }
+            if let Some(pairing) = info.pairing.as_ref() {
+                lines.push(Line::from(format!(
+                    "Auto-approve: {}, max auto devices: {}",
+                    if pairing.auto_approve {
+                        "да"
+                    } else {
+                        "нет"
+                    },
+                    pairing.max_auto_devices
+                )));
+                lines.push(Line::from(format!("Pairing TTL: {}s", pairing.pairing_ttl)));
+            }
+            lines.push(Line::from("r – обновить сведения"));
+        } else {
+            lines.push(Line::from("Нажмите r, чтобы запросить /api/server-info"));
+        }
+        let paragraph = Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .title("Сервер")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Blue)),
+            )
+            .wrap(Wrap { trim: true });
+        frame.render_widget(paragraph, area);
+    }
+
+    fn render_assist(&mut self, frame: &mut UiFrame, area: Rect) {
+        let mut lines = Vec::new();
+        if let Some(report) = self.assist_report.as_ref() {
+            lines.push(Line::from(format!(
+                "Noise pattern: {} static {}",
+                report.noise.pattern,
+                short_hex(&report.noise.static_public_hex)
+            )));
+            lines.push(Line::from(format!(
+                "Noise prologue: {} seed {}",
+                short_hex(&report.noise.prologue_hex),
+                short_hex(&report.noise.device_seed_hex)
+            )));
+            lines.push(Line::from(format!(
+                "PQ identity: {}",
+                short_hex(&report.pq.identity_public_hex)
+            )));
+            lines.push(Line::from(format!(
+                "PQ keys: signed {} kem {} sig {}",
+                short_hex(&report.pq.signed_prekey_public_hex),
+                short_hex(&report.pq.kem_public_hex),
+                short_hex(&report.pq.signature_public_hex)
+            )));
+            if !report.transports.is_empty() {
+                lines.push(Line::from("Транспорты:"));
+                for advice in report.transports.iter().take(4) {
+                    let label = format!(
+                        "• {} → {} (устойчивость {}, латентность {}, пропуск {} )",
+                        advice.path_id,
+                        advice.transport,
+                        advice.resistance,
+                        advice.latency,
+                        advice.throughput
+                    );
+                    lines.push(Line::from(label));
+                }
+            }
+            lines.push(Line::from(format!(
+                "FEC mtu {} overhead {:.2}",
+                report.multipath.fec_mtu, report.multipath.fec_overhead
+            )));
+            if let Some(primary) = report.multipath.primary_path.as_deref() {
+                lines.push(Line::from(format!("Основной путь: {}", primary)));
+            }
+            if !report.multipath.sample_segments.is_empty() {
+                lines.push(Line::from("Сегменты выборки:"));
+                for (path, breakdown) in report.multipath.sample_segments.iter().take(3) {
+                    lines.push(Line::from(format!(
+                        "• {} total={} repair={}",
+                        path, breakdown.total, breakdown.repair
+                    )));
+                }
+                if report.multipath.sample_segments.len() > 3 {
+                    lines.push(Line::from(format!(
+                        "… ещё {} сегментов",
+                        report.multipath.sample_segments.len() - 3
+                    )));
+                }
+            }
+            if report.obfuscation.domain_fronting
+                || report.obfuscation.protocol_mimicry
+                || report.obfuscation.tor_bridge
+            {
+                let mut flags = Vec::new();
+                if report.obfuscation.domain_fronting {
+                    flags.push("domain-fronting");
+                }
+                if report.obfuscation.protocol_mimicry {
+                    flags.push("protocol-mimicry");
+                }
+                if report.obfuscation.tor_bridge {
+                    flags.push("tor-bridge");
+                }
+                lines.push(Line::from(format!("Obfuscation: {}", flags.join(", "))));
+            }
+            if let Some(fingerprint) = report.obfuscation.reality_fingerprint_hex.as_deref() {
+                lines.push(Line::from(format!(
+                    "Reality fingerprint: {}",
+                    short_hex(fingerprint)
+                )));
+            }
+            lines.push(Line::from(format!(
+                "Security: noise={}, pq={}, fec={}, multipath={} (avg {:.1}), deflections={}",
+                report.security.noise_handshakes,
+                report.security.pq_handshakes,
+                report.security.fec_packets,
+                report.security.multipath_sessions,
+                report.security.average_paths,
+                report.security.censorship_deflections
+            )));
+            lines.push(Line::from("r – обновить P2P assist"));
+        } else {
+            lines.push(Line::from(
+                "Нажмите r, чтобы запросить рекомендации /api/p2p/assist",
+            ));
+        }
+        let paragraph = Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .title("P2P Assist")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Blue)),
+            )
+            .wrap(Wrap { trim: true });
+        frame.render_widget(paragraph, area);
+    }
+
+    fn view_help(&self) -> String {
+        match self.view {
+            AppView::Devices => {
+                "Устройства: r — обновить · v — revoke · i/Enter — детали".to_string()
+            }
+            AppView::Chat => "Чат: Enter — отправить · ':' — команда · Tab — канал".to_string(),
+            AppView::Friends => "Друзья: r — pull · p — push · d/Enter — детали".to_string(),
+            AppView::Pairing => "Pairing: g — новый код · Enter — показать последний".to_string(),
+            AppView::Info => "Сервер: r/Enter — обновить информацию".to_string(),
+            AppView::Assist => "P2P Assist: r/Enter — запросить рекомендации".to_string(),
+        }
+    }
+
+    fn input_title(&self) -> String {
+        let view_label = match self.view {
+            AppView::Chat => "Чат",
+            AppView::Devices => "Устройства",
+            AppView::Friends => "Друзья",
+            AppView::Pairing => "Pairing",
+            AppView::Info => "Сервер",
+            AppView::Assist => "P2P Assist",
+        };
+        let state = if self.connected { "online" } else { "offline" };
+        format!("Ввод · {} · {}", view_label, state)
+    }
+
+    fn render_input(&self, frame: &mut UiFrame, area: Rect) {
+        let help_line = Line::from(vec![Span::raw(self.view_help())]);
+        let input_line = Line::from(format!("> {}", self.input));
+        let text = Text::from(vec![help_line, input_line]);
+        let block = Block::default()
+            .title(self.input_title())
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Blue));
+        let paragraph = Paragraph::new(text)
             .block(block)
             .style(Style::default().fg(Color::White));
         frame.render_widget(paragraph, area);
