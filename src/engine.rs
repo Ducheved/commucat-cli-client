@@ -23,6 +23,7 @@ use tokio::task::JoinHandle;
 use tokio_rustls::TlsConnector;
 use tracing::{error, warn};
 use webpki_roots::TLS_SERVER_ROOTS;
+use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 
 const USER_AGENT: &str = "CommuCat-CLI/0.1";
 
@@ -200,20 +201,21 @@ impl ActiveConnection {
         let pattern_label = state.noise_pattern.to_uppercase();
         let device_keys = state.device_keypair()?;
         let pattern = parse_pattern(&state.noise_pattern)?;
-        let remote_static = if let HandshakePattern::Ik = pattern {
+        let remote_static = if matches!(pattern, HandshakePattern::Ik | HandshakePattern::Xk) {
             let raw = state
                 .server_static
                 .as_ref()
-                .ok_or_else(|| anyhow!("server_static required for IK"))?;
+                .ok_or_else(|| anyhow!("server_static required for this pattern"))?;
             Some(decode_hex32(raw)?)
         } else {
             None
         };
+        let (noise_private, noise_public) = derive_noise_keys(&device_keys.private);
         let noise = NoiseConfig {
             pattern,
             prologue: state.prologue.as_bytes().to_vec(),
-            local_private: device_keys.private,
-            local_static_public: Some(device_keys.public),
+            local_private: noise_private,
+            local_static_public: Some(noise_public),
             remote_static_public: remote_static,
         };
         let mut handshake = build_handshake(&noise, true).context("noise init")?;
@@ -224,7 +226,7 @@ impl ActiveConnection {
         hello_props.insert("device_id".to_string(), json!(device_id.clone()));
         hello_props.insert(
             "client_static".to_string(),
-            json!(encode_hex(&device_keys.public)),
+            json!(encode_hex(&noise_public)),
         );
         hello_props.insert("handshake".to_string(), json!(encode_hex(&hello_bytes)));
         hello_props.insert("capabilities".to_string(), json!(["noise", "zstd"]));
@@ -742,6 +744,12 @@ fn build_tls_connector(state: &ClientState) -> Result<TlsConnector> {
             .set_certificate_verifier(Arc::new(NoVerifier));
     }
     Ok(TlsConnector::from(Arc::new(config)))
+}
+
+fn derive_noise_keys(private: &[u8; 32]) -> ([u8; 32], [u8; 32]) {
+    let secret = StaticSecret::from(*private);
+    let public = X25519PublicKey::from(&secret);
+    (secret.to_bytes(), public.to_bytes())
 }
 
 struct NoVerifier;

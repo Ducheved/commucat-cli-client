@@ -380,12 +380,14 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "webpki-roots",
+ "x25519-dalek",
 ]
 
 [[package]]
 name = "commucat-crypto"
-version = "1.0.0"
-source = "git+https://github.com/Ducheved/commucat.git?rev=cd0afa237e9c1ea3c3913fc1f62bb7375101d4a8#cd0afa237e9c1ea3c3913fc1f62bb7375101d4a8"
+version = "1.0.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "938b1b42636d267a99b32df0a433409b29beb1f109fab74bca9df9372415aa8c"
 dependencies = [
  "blake3",
  "ed25519-dalek",
@@ -396,8 +398,9 @@ dependencies = [
 
 [[package]]
 name = "commucat-proto"
-version = "1.0.0"
-source = "git+https://github.com/Ducheved/commucat.git?rev=cd0afa237e9c1ea3c3913fc1f62bb7375101d4a8#cd0afa237e9c1ea3c3913fc1f62bb7375101d4a8"
+version = "1.0.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3e9a3615952390a2ce4c12244a312b58405a607c52203dd7e1a314a63dad7f28"
 dependencies = [
  "serde",
  "serde_json",
@@ -609,7 +612,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.0",
 ]
 
 [[package]]
@@ -1603,7 +1606,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.0",
 ]
 
 [[package]]
@@ -1997,7 +2000,7 @@ dependencies = [
  "getrandom 0.3.3",
  "once_cell",
  "rustix",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.0",
 ]
 
 [[package]]
@@ -2710,6 +2713,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ea2f10b9bb0928dfb1b42b65e1f9e36f7f54dbdf08457afefb38afcdec4fa2bb"
 
 [[package]]
+name = "x25519-dalek"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c7e468321c81fb07fa7f4c636c3972b9100f0346e5b6a9f2bd0603a52f7ed277"
+dependencies = [
+ "curve25519-dalek",
+ "rand_core",
+ "serde",
+ "zeroize",
+]
+
+[[package]]
 name = "yoke"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2759,6 +2774,20 @@ name = "zeroize"
 version = "1.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ced3678a2879b30306d323f4542626697a464a97c0a07c9aebf7ebca65cd4dde"
+dependencies = [
+ "zeroize_derive",
+]
+
+[[package]]
+name = "zeroize_derive"
+version = "1.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ce36e65b0d2999d2aafac989fb249189a141aee1f53c612c1f37d72631959f69"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
 
 [[package]]
 name = "zerotrie"

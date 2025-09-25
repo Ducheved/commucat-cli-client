@@ -22,6 +22,18 @@ impl RestClient {
         Ok(Self { base: url, client })
     }
 
+    pub async fn server_info(&self) -> Result<ServerInfo> {
+        let mut endpoint = self.base.clone();
+        endpoint.set_path("api/server-info");
+        let response = self
+            .client
+            .get(endpoint)
+            .send()
+            .await
+            .context("request /api/server-info")?;
+        Self::parse_response(response, StatusCode::OK).await
+    }
+
     pub async fn create_pairing(&self, session: &str, ttl: Option<i64>) -> Result<PairingTicket> {
         let mut endpoint = self.base.clone();
         endpoint.set_path("api/pair");
@@ -158,6 +170,28 @@ pub struct UserSummary {
 #[derive(Debug, Deserialize)]
 struct DevicesEnvelope {
     devices: Vec<DeviceEntry>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ServerInfo {
+    pub domain: String,
+    pub noise_public: String,
+    #[serde(default)]
+    pub supported_patterns: Vec<String>,
+    #[serde(default)]
+    pub supported_versions: Vec<u16>,
+    #[serde(default)]
+    pub pairing: Option<ServerPairingInfo>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ServerPairingInfo {
+    #[serde(default)]
+    pub auto_approve: bool,
+    #[serde(default)]
+    pub pairing_ttl: i64,
+    #[serde(default)]
+    pub max_auto_devices: i64,
 }
 
 #[allow(dead_code)]

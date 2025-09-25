@@ -178,6 +178,37 @@ async fn init_profile(args: InitArgs) -> Result<()> {
     if let Some(code) = pair_code {
         let rest = RestClient::new(&server)?;
         let claim = rest.claim_pairing(&code, device_name.as_deref()).await?;
+        let server_static_resolved = match server_static.clone() {
+            Some(value) => Some(value),
+            None => {
+                let info = rest.server_info().await.context("fetch server info")?;
+                if info.domain != domain {
+                    println!("warning: server reports domain {}", info.domain);
+                }
+                if !info.supported_patterns.is_empty()
+                    && !info
+                        .supported_patterns
+                        .iter()
+                        .any(|p| p.eq_ignore_ascii_case(&pattern))
+                {
+                    println!(
+                        "warning: server supports patterns {:?}, requested {}",
+                        info.supported_patterns, pattern
+                    );
+                }
+                if !info.supported_versions.is_empty() {
+                    println!("server protocol versions: {:?}", info.supported_versions);
+                }
+                if let Some(pairing) = info.pairing.clone() {
+                    println!(
+                        "pairing: auto_approve={} max_auto_devices={} ttl={}s",
+                        pairing.auto_approve, pairing.max_auto_devices, pairing.pairing_ttl
+                    );
+                }
+                println!("server noise_public={}", info.noise_public);
+                Some(info.noise_public)
+            }
+        };
         let private = decode_hex32(&claim.private_key)?;
         let public = decode_hex32(&claim.public_key)?;
         let keys = DeviceKeyPair { public, private };
@@ -189,7 +220,7 @@ async fn init_profile(args: InitArgs) -> Result<()> {
             pattern,
             prologue,
             tls_ca_path: tls_ca,
-            server_static,
+            server_static: server_static_resolved,
             insecure,
             presence_state: presence,
             presence_interval_secs: presence_interval,
@@ -214,6 +245,38 @@ async fn init_profile(args: InitArgs) -> Result<()> {
     let username = username.ok_or_else(|| anyhow!("--username обязателен без --pair-code"))?;
     let generated_device = device_id.unwrap_or_else(|| device::generate_device_id("device"));
     let keys = device::generate_keypair()?;
+    let server_static_resolved = match server_static.clone() {
+        Some(value) => Some(value),
+        None => {
+            let rest = RestClient::new(&server)?;
+            let info = rest.server_info().await.context("fetch server info")?;
+            if info.domain != domain {
+                println!("warning: server reports domain {}", info.domain);
+            }
+            if !info.supported_patterns.is_empty()
+                && !info
+                    .supported_patterns
+                    .iter()
+                    .any(|p| p.eq_ignore_ascii_case(&pattern))
+            {
+                println!(
+                    "warning: server supports patterns {:?}, requested {}",
+                    info.supported_patterns, pattern
+                );
+            }
+            if !info.supported_versions.is_empty() {
+                println!("server protocol versions: {:?}", info.supported_versions);
+            }
+            if let Some(pairing) = info.pairing.clone() {
+                println!(
+                    "pairing: auto_approve={} max_auto_devices={} ttl={}s",
+                    pairing.auto_approve, pairing.max_auto_devices, pairing.pairing_ttl
+                );
+            }
+            println!("server noise_public={}", info.noise_public);
+            Some(info.noise_public)
+        }
+    };
     let state = ClientState::from_params(ClientStateParams {
         device_id: generated_device.clone(),
         server_url: server,
@@ -222,7 +285,7 @@ async fn init_profile(args: InitArgs) -> Result<()> {
         pattern,
         prologue,
         tls_ca_path: tls_ca,
-        server_static,
+        server_static: server_static_resolved,
         insecure,
         presence_state: presence,
         presence_interval_secs: presence_interval,
