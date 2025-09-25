@@ -580,14 +580,15 @@ async fn attach_device_certificate(args: DevicesAttachCertArgs) -> Result<()> {
     if certificate.data.public_key != keys.public {
         bail!("сертификат не соответствует текущему публичному ключу устройства");
     }
-    if let Some(expected) = state.user_id.as_ref() {
-        if expected != &certificate.data.user_id {
+    match state.user_id.as_ref() {
+        Some(expected) if expected != &certificate.data.user_id => {
             bail!(
                 "сертификат принадлежит пользователю {}, а профиль связан с {}",
                 certificate.data.user_id,
                 expected
             );
         }
+        _ => {}
     }
     let issuer_bytes = match issuer {
         Some(hex) => {
@@ -643,8 +644,11 @@ async fn claim_device(args: ClaimArgs) -> Result<()> {
         if let Some(cert) = claim.device_certificate.as_ref() {
             state.set_certificate(cert)?;
         } else if let Some(ca_hex) = claim.device_ca_public.as_ref() {
-            if state.device_ca_public.as_ref() != Some(ca_hex) {
-                state.device_ca_public = Some(ca_hex.clone());
+            match state.device_ca_public.as_ref() {
+                Some(existing) if existing == ca_hex => {}
+                _ => {
+                    state.device_ca_public = Some(ca_hex.clone());
+                }
             }
         }
         state.user_handle = Some(claim.user.handle.clone());

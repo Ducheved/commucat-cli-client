@@ -394,33 +394,47 @@ impl ActiveConnection {
                                         value.get("user").and_then(|v| v.as_object())
                                     {
                                         if let Some(id) = user.get("id").and_then(|v| v.as_str()) {
-                                            if state.user_id.as_deref() != Some(id) {
-                                                state.user_id = Some(id.to_string());
-                                                state_dirty = true;
+                                            match state.user_id.as_deref() {
+                                                Some(existing) if existing == id => {}
+                                                _ => {
+                                                    state.user_id = Some(id.to_string());
+                                                    state_dirty = true;
+                                                }
                                             }
                                         }
                                         if let Some(handle) =
                                             user.get("handle").and_then(|v| v.as_str())
                                         {
-                                            if state.user_handle.as_deref() != Some(handle) {
-                                                state.user_handle = Some(handle.to_string());
-                                                state_dirty = true;
+                                            match state.user_handle.as_deref() {
+                                                Some(existing) if existing == handle => {}
+                                                _ => {
+                                                    state.user_handle = Some(handle.to_string());
+                                                    state_dirty = true;
+                                                }
                                             }
                                         }
                                         if let Some(name) =
                                             user.get("display_name").and_then(|v| v.as_str())
                                         {
-                                            if state.user_display_name.as_deref() != Some(name) {
-                                                state.user_display_name = Some(name.to_string());
-                                                state_dirty = true;
+                                            match state.user_display_name.as_deref() {
+                                                Some(existing) if existing == name => {}
+                                                _ => {
+                                                    state.user_display_name =
+                                                        Some(name.to_string());
+                                                    state_dirty = true;
+                                                }
                                             }
                                         }
                                         if let Some(avatar) =
                                             user.get("avatar_url").and_then(|v| v.as_str())
                                         {
-                                            if state.user_avatar_url.as_deref() != Some(avatar) {
-                                                state.user_avatar_url = Some(avatar.to_string());
-                                                state_dirty = true;
+                                            match state.user_avatar_url.as_deref() {
+                                                Some(existing) if existing == avatar => {}
+                                                _ => {
+                                                    state.user_avatar_url =
+                                                        Some(avatar.to_string());
+                                                    state_dirty = true;
+                                                }
                                             }
                                         }
                                     }
@@ -448,9 +462,12 @@ impl ActiveConnection {
                             FrameType::Ack => {
                                 if let Some(ack) = parse_handshake_ack(&frame) {
                                     if let Some(ca_hex) = ack.device_ca_public.as_ref() {
-                                        if state.device_ca_public.as_ref() != Some(ca_hex) {
-                                            state.device_ca_public = Some(ca_hex.clone());
-                                            state_dirty = true;
+                                        match state.device_ca_public.as_ref() {
+                                            Some(existing) if existing == ca_hex => {}
+                                            _ => {
+                                                state.device_ca_public = Some(ca_hex.clone());
+                                                state_dirty = true;
+                                            }
                                         }
                                     }
                                     if let Some(cert) = ack.certificate.as_ref() {
@@ -797,37 +814,38 @@ struct HandshakeAck {
 }
 
 fn parse_handshake_ack(frame: &Frame) -> Option<HandshakeAck> {
-    if let FramePayload::Control(ControlEnvelope { properties }) = &frame.payload {
-        if properties
-            .get("handshake")
-            .and_then(|v| v.as_str())
-            .map(|v| v == "ok")
-            .unwrap_or(false)
-        {
-            let required = properties
-                .get("pairing_required")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            let certificate = properties
-                .get("device_certificate")
-                .cloned()
-                .and_then(|value| serde_json::from_value::<DeviceCertificate>(value).ok());
-            let certificate_meta = properties
-                .get("certificate")
-                .and_then(parse_ack_certificate);
-            let device_ca_public = properties
-                .get("device_ca_public")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-            return Some(HandshakeAck {
-                pairing_required: required,
-                certificate,
-                certificate_meta,
-                device_ca_public,
-            });
-        }
+    let FramePayload::Control(ControlEnvelope { properties }) = &frame.payload else {
+        return None;
+    };
+    if !properties
+        .get("handshake")
+        .and_then(|v| v.as_str())
+        .map(|v| v == "ok")
+        .unwrap_or(false)
+    {
+        return None;
     }
-    None
+    let required = properties
+        .get("pairing_required")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let certificate = properties
+        .get("device_certificate")
+        .cloned()
+        .and_then(|value| serde_json::from_value::<DeviceCertificate>(value).ok());
+    let certificate_meta = properties
+        .get("certificate")
+        .and_then(parse_ack_certificate);
+    let device_ca_public = properties
+        .get("device_ca_public")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    Some(HandshakeAck {
+        pairing_required: required,
+        certificate,
+        certificate_meta,
+        device_ca_public,
+    })
 }
 
 fn parse_ack_certificate(value: &Value) -> Option<AckCertificateInfo> {

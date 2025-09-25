@@ -177,6 +177,7 @@ impl App {
                     self.record_message(frame.channel_id, MessageDirection::Inbound, text);
                 }
             }
+            #[allow(clippy::collapsible_if)]
             FrameType::Ack => {
                 if let FramePayload::Control(ControlEnvelope { properties }) = &frame.payload {
                     if let Some(value) = properties.get("ack") {
@@ -209,6 +210,7 @@ impl App {
                     self.record_system(format!("ошибка сервера: {}", detail));
                 }
             }
+            #[allow(clippy::collapsible_if)]
             FrameType::Join => {
                 if let FramePayload::Control(ControlEnvelope { properties }) = &frame.payload {
                     if let Some(array) = properties.get("members").and_then(|v| v.as_array()) {

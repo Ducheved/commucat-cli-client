@@ -10,31 +10,85 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build-release:
+  build:
+    name: Build (${{ matrix.os }} / ${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: commucat-cli-client-linux-amd64.tar.gz
+            binary: commucat-cli-client
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: commucat-cli-client-macos-arm64.tar.gz
+            binary: commucat-cli-client
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: commucat-cli-client-windows-amd64.zip
+            binary: commucat-cli-client.exe
+    steps:
+      - uses: actions/checkout@v4
+        with:
+            fetch-depth: 0
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/${{ matrix.binary }} dist/
+          cp README.md dist/README.md
+          tar -czf ${{ matrix.archive }} -C dist ${{ matrix.binary }} README.md
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target\${{ matrix.target }}\release\${{ matrix.binary }} dist\
+          Copy-Item README.md dist\README.md
+          Compress-Archive -Path dist\* -DestinationPath $env:ARCHIVE -Force
+        env:
+          ARCHIVE: ${{ matrix.archive }}
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.archive }}
+          path: ${{ matrix.archive }}
+          if-no-files-found: error
+
+  release:
+    name: Publish Release
+    needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
         with:
-          fetch-depth: 0
+          path: artifacts
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: List downloaded artifacts
+        run: ls -R artifacts
 
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Build
-        run: cargo build --release
-
-      - name: Package artifact
-        run: |
-          mkdir -p dist
-          cp target/release/commucat-cli-client dist/
-          cp README.md dist/README.md
-          tar -czf commucat-cli-client-linux-amd64.tar.gz -C dist commucat-cli-client README.md
-
-      - name: Upload release asset
+      - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: commucat-cli-client-linux-amd64.tar.gz
+          files: |
+            artifacts/**/*.tar.gz
+            artifacts/**/*.zip
           generate_release_notes: true

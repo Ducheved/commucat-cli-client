@@ -385,7 +385,9 @@ dependencies = [
 
 [[package]]
 name = "commucat-crypto"
-version = "1.0.0"
+version = "1.0.30"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "524a178091b938aedb01418072f73ac7a4bb3ed5b9606abf70d111d0bad99a1b"
 dependencies = [
  "blake3",
  "curve25519-dalek",
@@ -399,7 +401,9 @@ dependencies = [
 
 [[package]]
 name = "commucat-proto"
-version = "1.0.0"
+version = "1.0.30"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4abcc9a62a0374763d721b88c9891df05c38494e200794cdc27ac2898ba467c"
 dependencies = [
  "serde",
  "serde_json",
