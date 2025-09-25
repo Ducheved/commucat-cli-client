@@ -360,6 +360,7 @@ name = "commucat-cli-client"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "bytes",
  "chrono",
  "clap",
@@ -381,15 +382,16 @@ dependencies = [
  "tokio-rustls",
  "tracing",
  "tracing-subscriber",
+ "uuid",
  "webpki-roots",
  "x25519-dalek",
 ]
 
 [[package]]
 name = "commucat-crypto"
-version = "1.0.40"
+version = "1.0.41"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2ce58ba604bd978367d3fec8ff48d954ad0b2555b30d58309575b1eebd08554"
+checksum = "1d6c34636d199f1aad5664c0d178f4b6af7f0f717f3954a31ee4fdc3c5d3438f"
 dependencies = [
  "blake3",
  "curve25519-dalek",
@@ -403,9 +405,9 @@ dependencies = [
 
 [[package]]
 name = "commucat-proto"
-version = "1.0.40"
+version = "1.0.41"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c918d664e9a93edd30915a5ea74d3c5cdbcfd7d119a8245c5012c60c7a936ba"
+checksum = "8fe07adf8e73499c314dce048724fcde652ca24b8a33d93dd75c685814ffc553"
 dependencies = [
  "serde",
  "serde_json",
@@ -2335,6 +2337,17 @@ name = "utf8parse"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
+
+[[package]]
+name = "uuid"
+version = "1.18.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2f87b8aa10b915a06587d0dec516c282ff295b475d94abf425d62b57710070a2"
+dependencies = [
+ "getrandom 0.3.3",
+ "js-sys",
+ "wasm-bindgen",
+]
 
 [[package]]
 name = "valuable"

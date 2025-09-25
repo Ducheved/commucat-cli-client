@@ -170,7 +170,7 @@ impl RestClient {
                     .title
                     .unwrap_or_else(|| format!("request failed with status {}", status))
             }))),
-            None => Err(anyhow!(format!("request failed with status {}", status))),
+            _ => Err(anyhow!(format!("request failed with status {}", status))),
         }
     }
 }
@@ -404,4 +404,89 @@ struct ProblemDetails {
     title: Option<String>,
     #[serde(default)]
     detail: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn p2p_assist_errors_for_unreachable_host() {
+        let client = RestClient::new("http://127.0.0.1:9").unwrap();
+        let request = P2pAssistRequest {
+            peer_hint: Some("peer-1".to_string()),
+            paths: vec![AssistPathHint {
+                address: Some("127.0.0.1".to_string()),
+                port: Some(1234),
+                priority: Some(1),
+                ..Default::default()
+            }],
+            prefer_reality: None,
+            fec: Some(AssistFecHint {
+                mtu: Some(1200),
+                repair_overhead: Some(0.2),
+            }),
+            min_paths: Some(1),
+        };
+
+        assert!(client.p2p_assist("token", &request).await.is_err());
+        let serialized = serde_json::to_string(&request).unwrap();
+        assert!(serialized.contains("peer-1"));
+    }
+
+    #[test]
+    fn assist_response_deserializes() {
+        let payload = json!({
+            "noise": {
+                "pattern": "NX",
+                "prologue_hex": "00",
+                "device_seed_hex": "11",
+                "static_public_hex": "22"
+            },
+            "pq": {
+                "identity_public_hex": "aa",
+                "signed_prekey_public_hex": "bb",
+                "kem_public_hex": "cc",
+                "signature_public_hex": "dd"
+            },
+            "transports": [
+                {
+                    "path_id": "path-1",
+                    "transport": "udp",
+                    "resistance": "medium",
+                    "latency": "50ms",
+                    "throughput": "10mbps"
+                }
+            ],
+            "multipath": {
+                "fec_mtu": 1200,
+                "fec_overhead": 0.25,
+                "primary_path": "path-1",
+                "sample_segments": {
+                    "path-1": { "total": 10, "repair": 2 }
+                }
+            },
+            "obfuscation": {
+                "reality_fingerprint_hex": "feed",
+                "domain_fronting": true,
+                "protocol_mimicry": false,
+                "tor_bridge": false
+            },
+            "security": {
+                "noise_handshakes": 1,
+                "pq_handshakes": 2,
+                "fec_packets": 3,
+                "multipath_sessions": 4,
+                "average_paths": 1.5,
+                "censorship_deflections": 0
+            }
+        });
+
+        let response: P2pAssistResponse = serde_json::from_value(payload).unwrap();
+        assert_eq!(response.transports.len(), 1);
+        assert_eq!(response.multipath.sample_segments.len(), 1);
+        assert!(response.obfuscation.domain_fronting);
+        assert_eq!(response.security.noise_handshakes, 1);
+    }
 }

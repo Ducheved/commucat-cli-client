@@ -1,9 +1,15 @@
+mod animations;
+mod ascii_art;
+mod calls;
 mod config;
 mod device;
 mod engine;
+mod groups;
 mod hexutil;
+mod media;
 mod rest;
 mod tui;
+mod voice;
 
 use crate::config::{ClientState, ClientStateParams, FriendEntry, docs_path, state_path};
 use crate::device::describe_keys;
