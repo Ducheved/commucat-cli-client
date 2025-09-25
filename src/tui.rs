@@ -5,7 +5,7 @@ use crate::rest::{DeviceEntry, FriendEntryPayload, PairingTicket, RestClient};
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Utc};
 use commucat_proto::{ControlEnvelope, Frame as ProtoFrame, FramePayload, FrameType};
-use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -89,6 +89,10 @@ impl App {
     }
 
     async fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.kind {
+            KeyEventKind::Press | KeyEventKind::Repeat => {}
+            KeyEventKind::Release => return Ok(()),
+        }
         if matches!(key.modifiers, KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.should_quit = true;
             return Ok(());

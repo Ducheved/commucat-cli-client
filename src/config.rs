@@ -1,6 +1,7 @@
 use crate::hexutil::{decode_hex32, encode_hex};
 use anyhow::{Context, Result, anyhow};
 use commucat_crypto::{DeviceCertificate, DeviceKeyPair};
+use directories::BaseDirs;
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
@@ -110,6 +111,12 @@ impl ClientState {
     pub fn save(&self) -> Result<()> {
         let path = state_path()?;
         if let Some(parent) = path.parent() {
+            if parent.exists() && !parent.is_dir() {
+                return Err(anyhow!(format!(
+                    "state directory {} exists and is not a directory",
+                    parent.display()
+                )));
+            }
             fs::create_dir_all(parent).context("state directory")?;
         }
         let payload = serde_json::to_string_pretty(self).context("serialize state")?;
@@ -256,13 +263,29 @@ impl ClientState {
 }
 
 pub fn state_path() -> Result<PathBuf> {
-    let base = if let Ok(path) = env::var("COMMUCAT_CLIENT_HOME") {
-        PathBuf::from(path)
-    } else {
-        let home = env::var("HOME").map_err(|_| anyhow!("HOME not set"))?;
-        Path::new(&home).join(".config").join("commucat")
-    };
-    Ok(base.join("client.json"))
+    if let Ok(path) = env::var("COMMUCAT_CLIENT_HOME") {
+        return Ok(PathBuf::from(path).join("client.json"));
+    }
+
+    if let Some(base_dirs) = BaseDirs::new() {
+        return Ok(
+            base_dirs
+                .config_dir()
+                .join("commucat")
+                .join("client.json"),
+        );
+    }
+
+    if let Ok(home) = env::var("HOME") {
+        return Ok(
+            Path::new(&home)
+                .join(".config")
+                .join("commucat")
+                .join("client.json"),
+        );
+    }
+
+    Err(anyhow!("unable to determine state directory"))
 }
 
 pub fn docs_path(lang: &str) -> Result<PathBuf> {
