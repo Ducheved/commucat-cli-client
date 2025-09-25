@@ -2,7 +2,8 @@ use crate::config::ClientState;
 use crate::hexutil::{decode_hex, decode_hex32, encode_hex};
 use anyhow::{Context, Result, anyhow};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use commucat_crypto::{HandshakePattern, NoiseConfig, build_handshake};
+use chrono::Utc;
+use commucat_crypto::{DeviceCertificate, HandshakePattern, NoiseConfig, build_handshake};
 use commucat_proto::{ControlEnvelope, Frame, FramePayload, FrameType, PROTOCOL_VERSION};
 use futures::future::poll_fn;
 use h2::{RecvStream, SendStream, client};
@@ -11,7 +12,7 @@ use rustls::client::{HandshakeSignatureValid, ServerCertVerified, ServerCertVeri
 use rustls::{
     Certificate, ClientConfig, DigitallySignedStruct, OwnedTrustAnchor, RootCertStore, ServerName,
 };
-use serde_json::{Map, Value, json};
+use serde_json::{self, Map, Value, json};
 use std::convert::TryFrom;
 use std::fs::File;
 use std::io::BufReader;
@@ -26,6 +27,7 @@ use webpki_roots::TLS_SERVER_ROOTS;
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 
 const USER_AGENT: &str = "CommuCat-CLI/0.1";
+const CERT_MAX_FUTURE_SKEW: i64 = 300;
 
 pub struct EngineHandle {
     sender: mpsc::Sender<EngineCommand>,
@@ -105,6 +107,7 @@ struct ActiveConnection {
 
 impl ActiveConnection {
     async fn connect(mut state: ClientState, events: mpsc::Sender<ClientEvent>) -> Result<Self> {
+        let mut state_dirty = false;
         let uri: Uri = state.server_url.parse().context("invalid server url")?;
         let scheme = uri.scheme_str().unwrap_or("https");
         if scheme != "https" {
@@ -200,6 +203,72 @@ impl ActiveConnection {
         let device_id = state.device_id.clone();
         let pattern_label = state.noise_pattern.to_uppercase();
         let device_keys = state.device_keypair()?;
+        let certificate_opt = state.device_certificate()?;
+        let mut certificate_for_hello: Option<DeviceCertificate> = None;
+        let mut ca_public_hex = state.device_ca_public.clone();
+        if let Some(cert) = certificate_opt {
+            if cert.data.device_id != device_id {
+                return Err(anyhow!(
+                    "сертификат выдан для {}, а профиль настроен для {}",
+                    cert.data.device_id,
+                    device_id
+                ));
+            }
+            if cert.data.public_key != device_keys.public {
+                return Err(anyhow!(
+                    "сертификат не соответствует текущему публичному ключу устройства"
+                ));
+            }
+            if let Some(expected_user) = state.user_id.as_ref() {
+                if expected_user != &cert.data.user_id {
+                    return Err(anyhow!(
+                        "сертификат принадлежит пользователю {}, а профиль связан с {}",
+                        cert.data.user_id,
+                        expected_user
+                    ));
+                }
+            } else {
+                state.user_id = Some(cert.data.user_id.clone());
+                state_dirty = true;
+            }
+            if ca_public_hex.is_none() {
+                ca_public_hex = Some(encode_hex(&cert.data.issuer));
+                state.device_ca_public = ca_public_hex.clone();
+                state_dirty = true;
+            }
+            if let Some(ref hex) = ca_public_hex {
+                let ca_public = decode_hex32(hex)
+                    .map_err(|_| anyhow!("device_ca_public содержит некорректный hex"))?;
+                if ca_public != cert.data.issuer {
+                    return Err(anyhow!("сертификат выдан другим центром сертификации"));
+                }
+                cert.verify(&ca_public)
+                    .context("подпись сертификата невалидна")?;
+            } else {
+                cert.verify(&cert.data.issuer)
+                    .context("подпись сертификата невалидна")?;
+            }
+            let now_ts = Utc::now().timestamp();
+            if now_ts > cert.data.expires_at {
+                return Err(anyhow!("срок действия сертификата истёк"));
+            }
+            if cert.data.issued_at > now_ts + CERT_MAX_FUTURE_SKEW {
+                return Err(anyhow!("сертификат ещё не вступил в силу"));
+            }
+            if state.device_certificate_serial != Some(cert.data.serial) {
+                state.device_certificate_serial = Some(cert.data.serial);
+                state_dirty = true;
+            }
+            if state.device_certificate_issued_at != Some(cert.data.issued_at) {
+                state.device_certificate_issued_at = Some(cert.data.issued_at);
+                state_dirty = true;
+            }
+            if state.device_certificate_expires_at != Some(cert.data.expires_at) {
+                state.device_certificate_expires_at = Some(cert.data.expires_at);
+                state_dirty = true;
+            }
+            certificate_for_hello = Some(cert.clone());
+        }
         let pattern = parse_pattern(&state.noise_pattern)?;
         let remote_static = if matches!(pattern, HandshakePattern::Ik | HandshakePattern::Xk) {
             let raw = state
@@ -230,6 +299,12 @@ impl ActiveConnection {
         );
         hello_props.insert("handshake".to_string(), json!(encode_hex(&hello_bytes)));
         hello_props.insert("capabilities".to_string(), json!(["noise", "zstd"]));
+        if let Some(cert) = certificate_for_hello.as_ref() {
+            hello_props.insert(
+                "certificate".to_string(),
+                serde_json::to_value(cert).context("encode certificate")?,
+            );
+        }
         if let Some(handle) = state.user_handle.clone() {
             let mut user_payload: Map<String, Value> = Map::new();
             user_payload.insert("handle".to_string(), json!(handle));
@@ -243,6 +318,9 @@ impl ActiveConnection {
                 user_payload.insert("avatar_url".to_string(), json!(avatar));
             }
             hello_props.insert("user".to_string(), Value::Object(user_payload));
+        }
+        if let Some(hex) = ca_public_hex.as_ref() {
+            hello_props.insert("device_ca_public".to_string(), json!(hex));
         }
         let hello_frame = Frame {
             channel_id: 0,
@@ -267,7 +345,6 @@ impl ActiveConnection {
         let mut buffer = BytesMut::new();
         let mut session_id = String::new();
         let mut next_sequence = 2u64;
-        let mut state_dirty = false;
         let connection = 'handshake: loop {
             match recv_stream.data().await {
                 Some(Ok(bytes)) => buffer.put_slice(&bytes),
@@ -353,7 +430,71 @@ impl ActiveConnection {
                                 next_sequence = 3;
                             }
                             FrameType::Ack => {
-                                if let Some(required) = parse_handshake_ack(&frame) {
+                                if let Some(ack) = parse_handshake_ack(&frame) {
+                                    if let Some(ca_hex) = ack.device_ca_public.as_ref() {
+                                        if state.device_ca_public.as_ref() != Some(ca_hex) {
+                                            state.device_ca_public = Some(ca_hex.clone());
+                                            state_dirty = true;
+                                        }
+                                    }
+                                    if let Some(cert) = ack.certificate.as_ref() {
+                                        match state.set_certificate(cert) {
+                                            Ok(()) => {
+                                                state.device_certificate_serial =
+                                                    Some(cert.data.serial);
+                                                state.device_certificate_issued_at =
+                                                    Some(cert.data.issued_at);
+                                                state.device_certificate_expires_at =
+                                                    Some(cert.data.expires_at);
+                                                state_dirty = true;
+                                            }
+                                            Err(err) => {
+                                                let _ = events
+                                                    .send(ClientEvent::Log {
+                                                        line: format!(
+                                                            "не удалось сохранить сертификат: {}",
+                                                            err
+                                                        ),
+                                                    })
+                                                    .await;
+                                            }
+                                        }
+                                        let _ = events
+                                            .send(ClientEvent::Log {
+                                                line: format!(
+                                                    "сертификат подтверждён: serial={} действует до {}",
+                                                    cert.data.serial, cert.data.expires_at
+                                                ),
+                                            })
+                                            .await;
+                                    } else if let Some(info) = ack.certificate_meta.as_ref() {
+                                        if state.device_certificate_serial != Some(info.serial) {
+                                            state.device_certificate_serial = Some(info.serial);
+                                            state_dirty = true;
+                                        }
+                                        if state.device_certificate_issued_at
+                                            != Some(info.issued_at)
+                                        {
+                                            state.device_certificate_issued_at =
+                                                Some(info.issued_at);
+                                            state_dirty = true;
+                                        }
+                                        if state.device_certificate_expires_at
+                                            != Some(info.expires_at)
+                                        {
+                                            state.device_certificate_expires_at =
+                                                Some(info.expires_at);
+                                            state_dirty = true;
+                                        }
+                                        let _ = events
+                                            .send(ClientEvent::Log {
+                                                line: format!(
+                                                    "сертификат: serial={} действует до {}",
+                                                    info.serial, info.expires_at
+                                                ),
+                                            })
+                                            .await;
+                                    }
                                     if session_id.is_empty() {
                                         session_id = "unknown".to_string();
                                     }
@@ -365,9 +506,9 @@ impl ActiveConnection {
                                         sequence: next_sequence,
                                         reader_task,
                                         driver_task,
-                                        pairing_required: required,
+                                        pairing_required: ack.pairing_required,
                                     };
-                                    if required {
+                                    if ack.pairing_required {
                                         let _ = events
                                             .send(ClientEvent::Log {
                                                 line: "сервер требует pairing для новых устройств"
@@ -624,7 +765,22 @@ fn control_payload(payload: FramePayload) -> Result<serde_json::Value> {
     }
 }
 
-fn parse_handshake_ack(frame: &Frame) -> Option<bool> {
+#[derive(Debug, Clone)]
+struct AckCertificateInfo {
+    serial: u64,
+    issued_at: i64,
+    expires_at: i64,
+}
+
+#[derive(Debug, Clone)]
+struct HandshakeAck {
+    pairing_required: bool,
+    certificate: Option<DeviceCertificate>,
+    certificate_meta: Option<AckCertificateInfo>,
+    device_ca_public: Option<String>,
+}
+
+fn parse_handshake_ack(frame: &Frame) -> Option<HandshakeAck> {
     if let FramePayload::Control(ControlEnvelope { properties }) = &frame.payload {
         if properties
             .get("handshake")
@@ -636,10 +792,38 @@ fn parse_handshake_ack(frame: &Frame) -> Option<bool> {
                 .get("pairing_required")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            return Some(required);
+            let certificate = properties
+                .get("device_certificate")
+                .cloned()
+                .and_then(|value| serde_json::from_value::<DeviceCertificate>(value).ok());
+            let certificate_meta = properties
+                .get("certificate")
+                .and_then(parse_ack_certificate);
+            let device_ca_public = properties
+                .get("device_ca_public")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            return Some(HandshakeAck {
+                pairing_required: required,
+                certificate,
+                certificate_meta,
+                device_ca_public,
+            });
         }
     }
     None
+}
+
+fn parse_ack_certificate(value: &Value) -> Option<AckCertificateInfo> {
+    let obj = value.as_object()?;
+    let serial = obj.get("serial")?.as_u64()?;
+    let issued_at = obj.get("issued_at")?.as_i64()?;
+    let expires_at = obj.get("expires_at")?.as_i64()?;
+    Some(AckCertificateInfo {
+        serial,
+        issued_at,
+        expires_at,
+    })
 }
 
 fn spawn_reader(

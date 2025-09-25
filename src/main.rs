@@ -13,8 +13,9 @@ use crate::rest::{
 };
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
-use commucat_crypto::DeviceKeyPair;
+use commucat_crypto::{DeviceCertificate, DeviceKeyPair};
 use std::fs;
+use std::path::Path;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
@@ -48,6 +49,7 @@ enum Command {
 enum DevicesCommand {
     List(DevicesListArgs),
     Revoke(DevicesRevokeArgs),
+    AttachCert(DevicesAttachCertArgs),
 }
 
 #[derive(Subcommand)]
@@ -70,6 +72,14 @@ struct DevicesRevokeArgs {
     device_id: String,
     #[arg(long)]
     session: Option<String>,
+}
+
+#[derive(Args)]
+struct DevicesAttachCertArgs {
+    #[arg(long)]
+    certificate: String,
+    #[arg(long)]
+    issuer: Option<String>,
 }
 
 #[derive(Args)]
@@ -218,6 +228,7 @@ async fn init_profile(args: InitArgs) -> Result<()> {
         pair_code,
         force,
     } = args;
+    let mut server_ca_from_info: Option<String> = None;
     let path = state_path()?;
     if path.exists() && !force {
         bail!("профиль уже существует: {}", path.display());
@@ -256,12 +267,17 @@ async fn init_profile(args: InitArgs) -> Result<()> {
                     );
                 }
                 println!("server noise_public={}", info.noise_public);
+                server_ca_from_info = info.device_ca_public.clone();
                 Some(info.noise_public)
             }
         };
         let private = decode_hex32(&claim.private_key)?;
         let public = decode_hex32(&claim.public_key)?;
         let keys = DeviceKeyPair { public, private };
+        let device_ca_public = claim
+            .device_ca_public
+            .clone()
+            .or_else(|| server_ca_from_info.clone());
         let state = ClientState::from_params(ClientStateParams {
             device_id: claim.device_id.clone(),
             server_url: server.clone(),
@@ -282,6 +298,8 @@ async fn init_profile(args: InitArgs) -> Result<()> {
             session_token: session.clone(),
             device_name: claim.device_name.clone().or(device_name),
             friends: Vec::new(),
+            device_certificate: claim.device_certificate.clone(),
+            device_ca_public,
         });
         state.save()?;
         println!("state saved to {}", path.display());
@@ -290,6 +308,15 @@ async fn init_profile(args: InitArgs) -> Result<()> {
             describe_keys(&claim.device_id, &state.device_keypair()?)
         );
         print_claim_summary(&claim);
+        if let Some(cert) = claim.device_certificate.as_ref() {
+            println!(
+                "certificate_serial={} expires_at={}",
+                cert.data.serial, cert.data.expires_at
+            );
+        }
+        if let Some(ca_hex) = state.device_ca_public.as_ref() {
+            println!("device_ca_public={}", ca_hex);
+        }
         return Ok(());
     }
 
@@ -325,6 +352,7 @@ async fn init_profile(args: InitArgs) -> Result<()> {
                 );
             }
             println!("server noise_public={}", info.noise_public);
+            server_ca_from_info = info.device_ca_public.clone();
             Some(info.noise_public)
         }
     };
@@ -348,6 +376,8 @@ async fn init_profile(args: InitArgs) -> Result<()> {
         session_token: session.clone(),
         device_name,
         friends: Vec::new(),
+        device_certificate: None,
+        device_ca_public: server_ca_from_info.clone(),
     });
     state.save()?;
     println!("state saved to {}", path.display());
@@ -366,6 +396,9 @@ async fn init_profile(args: InitArgs) -> Result<()> {
     }
     if let Some(token) = session {
         println!("session={} (будет использована REST API)", token);
+    }
+    if let Some(ca_hex) = state.device_ca_public.as_ref() {
+        println!("device_ca_public={}", ca_hex);
     }
     if let Ok(doc_path) = docs_path("ru") {
         println!("Руководство: {}", doc_path.display());
@@ -412,6 +445,7 @@ async fn handle_devices(command: DevicesCommand) -> Result<()> {
     match command {
         DevicesCommand::List(args) => list_devices(args).await,
         DevicesCommand::Revoke(args) => revoke_device(args).await,
+        DevicesCommand::AttachCert(args) => attach_device_certificate(args).await,
     }
 }
 
@@ -522,6 +556,61 @@ async fn revoke_device(args: DevicesRevokeArgs) -> Result<()> {
     Ok(())
 }
 
+async fn attach_device_certificate(args: DevicesAttachCertArgs) -> Result<()> {
+    let DevicesAttachCertArgs {
+        certificate,
+        issuer,
+    } = args;
+    let mut state = ClientState::load()?;
+    let raw = if Path::new(&certificate).exists() {
+        fs::read_to_string(&certificate).context("read certificate file")?
+    } else {
+        certificate
+    };
+    let certificate: DeviceCertificate =
+        serde_json::from_str(raw.trim()).context("parse device certificate")?;
+    if certificate.data.device_id != state.device_id {
+        bail!(
+            "сертификат выдан для {}, а профиль настроен для {}",
+            certificate.data.device_id,
+            state.device_id
+        );
+    }
+    let keys = state.device_keypair()?;
+    if certificate.data.public_key != keys.public {
+        bail!("сертификат не соответствует текущему публичному ключу устройства");
+    }
+    if let Some(expected) = state.user_id.as_ref() {
+        if expected != &certificate.data.user_id {
+            bail!(
+                "сертификат принадлежит пользователю {}, а профиль связан с {}",
+                certificate.data.user_id,
+                expected
+            );
+        }
+    }
+    let issuer_bytes = match issuer {
+        Some(hex) => {
+            let bytes = decode_hex32(&hex)?;
+            if bytes != certificate.data.issuer {
+                bail!("указанный issuer не совпадает с полем issuer сертификата");
+            }
+            bytes
+        }
+        None => certificate.data.issuer,
+    };
+    certificate
+        .verify(&issuer_bytes)
+        .context("подпись сертификата невалидна")?;
+    state.set_certificate(&certificate)?;
+    state.save()?;
+    println!(
+        "Сертификат устройства serial={} сохранён. Срок действия до {}.",
+        certificate.data.serial, certificate.data.expires_at
+    );
+    Ok(())
+}
+
 async fn claim_device(args: ClaimArgs) -> Result<()> {
     let ClaimArgs {
         pair_code,
@@ -551,6 +640,13 @@ async fn claim_device(args: ClaimArgs) -> Result<()> {
         let keys = DeviceKeyPair { public, private };
         state.device_id = claim.device_id.clone();
         state.update_keys(&keys);
+        if let Some(cert) = claim.device_certificate.as_ref() {
+            state.set_certificate(cert)?;
+        } else if let Some(ca_hex) = claim.device_ca_public.as_ref() {
+            if state.device_ca_public.as_ref() != Some(ca_hex) {
+                state.device_ca_public = Some(ca_hex.clone());
+            }
+        }
         state.user_handle = Some(claim.user.handle.clone());
         state.user_display_name = claim.user.display_name.clone();
         state.user_avatar_url = claim.user.avatar_url.clone();
@@ -561,6 +657,15 @@ async fn claim_device(args: ClaimArgs) -> Result<()> {
         }
         state.save()?;
         println!("state обновлён в {}", state_path()?.display());
+        if let Some(cert) = claim.device_certificate.as_ref() {
+            println!(
+                "certificate_serial={} expires_at={}",
+                cert.data.serial, cert.data.expires_at
+            );
+        }
+        if let Some(ca_hex) = state.device_ca_public.as_ref() {
+            println!("device_ca_public={}", ca_hex);
+        }
     }
     Ok(())
 }

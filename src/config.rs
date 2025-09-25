@@ -1,6 +1,6 @@
 use crate::hexutil::{decode_hex32, encode_hex};
 use anyhow::{Context, Result, anyhow};
-use commucat_crypto::DeviceKeyPair;
+use commucat_crypto::{DeviceCertificate, DeviceKeyPair};
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
@@ -41,6 +41,16 @@ pub struct ClientState {
     pub last_pairing_issuer_device_id: Option<String>,
     #[serde(default)]
     pub friends: Vec<FriendEntry>,
+    #[serde(default)]
+    pub device_certificate: Option<String>,
+    #[serde(default)]
+    pub device_certificate_serial: Option<u64>,
+    #[serde(default)]
+    pub device_certificate_issued_at: Option<i64>,
+    #[serde(default)]
+    pub device_certificate_expires_at: Option<i64>,
+    #[serde(default)]
+    pub device_ca_public: Option<String>,
 }
 
 /// Параметры формирования ClientState без чтения из файла.
@@ -73,6 +83,8 @@ pub struct ClientStateParams {
     pub session_token: Option<String>,
     pub device_name: Option<String>,
     pub friends: Vec<FriendEntry>,
+    pub device_certificate: Option<DeviceCertificate>,
+    pub device_ca_public: Option<String>,
 }
 
 impl ClientState {
@@ -111,30 +123,71 @@ impl ClientState {
     }
 
     pub fn from_params(params: ClientStateParams) -> Self {
+        let ClientStateParams {
+            device_id,
+            server_url,
+            domain,
+            keys,
+            pattern,
+            prologue,
+            tls_ca_path,
+            server_static,
+            insecure,
+            presence_state,
+            presence_interval_secs,
+            traceparent,
+            user_handle,
+            user_display_name,
+            user_avatar_url,
+            user_id,
+            session_token,
+            device_name,
+            friends,
+            device_certificate,
+            device_ca_public,
+        } = params;
+        let device_certificate_json = device_certificate
+            .as_ref()
+            .map(|cert| serde_json::to_string(cert).expect("certificate serialization"));
+        let device_certificate_serial = device_certificate.as_ref().map(|cert| cert.data.serial);
+        let device_certificate_issued_at =
+            device_certificate.as_ref().map(|cert| cert.data.issued_at);
+        let device_certificate_expires_at =
+            device_certificate.as_ref().map(|cert| cert.data.expires_at);
+        let device_ca_public = device_ca_public.or_else(|| {
+            device_certificate
+                .as_ref()
+                .map(|c| encode_hex(&c.data.issuer))
+        });
         ClientState {
-            device_id: params.device_id,
-            server_url: params.server_url,
-            domain: params.domain,
-            private_key: encode_hex(&params.keys.private),
-            public_key: encode_hex(&params.keys.public),
-            noise_pattern: params.pattern,
-            prologue: params.prologue,
-            tls_ca_path: params.tls_ca_path,
-            server_static: params.server_static,
-            insecure: params.insecure,
-            presence_state: params.presence_state,
-            presence_interval_secs: params.presence_interval_secs,
-            traceparent: params.traceparent,
-            user_handle: params.user_handle,
-            user_display_name: params.user_display_name,
-            user_avatar_url: params.user_avatar_url,
-            user_id: params.user_id,
-            session_token: params.session_token,
-            device_name: params.device_name,
+            device_id,
+            server_url,
+            domain,
+            private_key: encode_hex(&keys.private),
+            public_key: encode_hex(&keys.public),
+            noise_pattern: pattern,
+            prologue,
+            tls_ca_path,
+            server_static,
+            insecure,
+            presence_state,
+            presence_interval_secs,
+            traceparent,
+            user_handle,
+            user_display_name,
+            user_avatar_url,
+            user_id,
+            session_token,
+            device_name,
             last_pairing_code: None,
             last_pairing_expires_at: None,
             last_pairing_issuer_device_id: None,
-            friends: params.friends,
+            friends,
+            device_certificate: device_certificate_json,
+            device_certificate_serial,
+            device_certificate_issued_at,
+            device_certificate_expires_at,
+            device_ca_public,
         }
     }
 
@@ -167,6 +220,38 @@ impl ClientState {
     pub fn update_keys(&mut self, keys: &DeviceKeyPair) {
         self.private_key = encode_hex(&keys.private);
         self.public_key = encode_hex(&keys.public);
+        self.clear_certificate();
+    }
+
+    pub fn device_certificate(&self) -> Result<Option<DeviceCertificate>> {
+        match self.device_certificate.as_ref() {
+            Some(raw) => {
+                let cert: DeviceCertificate = serde_json::from_str(raw)
+                    .map_err(|err| anyhow!(format!("invalid device certificate: {}", err)))?;
+                Ok(Some(cert))
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub fn set_certificate(&mut self, certificate: &DeviceCertificate) -> Result<()> {
+        self.device_certificate = Some(serde_json::to_string(certificate)?);
+        self.device_certificate_serial = Some(certificate.data.serial);
+        self.device_certificate_issued_at = Some(certificate.data.issued_at);
+        self.device_certificate_expires_at = Some(certificate.data.expires_at);
+        self.device_ca_public = Some(encode_hex(&certificate.data.issuer));
+        if self.user_id.is_none() {
+            self.user_id = Some(certificate.data.user_id.clone());
+        }
+        Ok(())
+    }
+
+    pub fn clear_certificate(&mut self) {
+        self.device_certificate = None;
+        self.device_certificate_serial = None;
+        self.device_certificate_issued_at = None;
+        self.device_certificate_expires_at = None;
+        self.device_ca_public = None;
     }
 }
 
@@ -224,6 +309,8 @@ mod tests {
             session_token: None,
             device_name: None,
             friends: Vec::new(),
+            device_certificate: None,
+            device_ca_public: None,
         });
         assert_eq!(state.device_id, "device");
         assert_eq!(state.noise_pattern, "XK");

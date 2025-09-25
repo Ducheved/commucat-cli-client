@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, anyhow};
+use commucat_crypto::DeviceCertificate;
 use reqwest::{Client, StatusCode, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -190,6 +191,10 @@ pub struct PairingClaimResponse {
     pub user: UserSummary,
     #[serde(default)]
     pub device_name: Option<String>,
+    #[serde(default)]
+    pub device_certificate: Option<DeviceCertificate>,
+    #[serde(default)]
+    pub device_ca_public: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -216,6 +221,8 @@ struct FriendsEnvelope {
 pub struct ServerInfo {
     pub domain: String,
     pub noise_public: String,
+    #[serde(default)]
+    pub device_ca_public: Option<String>,
     #[serde(default)]
     pub supported_patterns: Vec<String>,
     #[serde(default)]
