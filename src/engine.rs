@@ -3,7 +3,7 @@ use crate::hexutil::{decode_hex, decode_hex32, encode_hex};
 use anyhow::{Context, Result, anyhow};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use chrono::Utc;
-use commucat_crypto::{DeviceCertificate, HandshakePattern, NoiseConfig, build_handshake};
+use commucat_crypto::{DeviceCertificate, HandshakePattern, NoiseConfig, build_handshake, zkp};
 use commucat_proto::{ControlEnvelope, Frame, FramePayload, FrameType, PROTOCOL_VERSION};
 use futures::future::poll_fn;
 use h2::{RecvStream, SendStream, client};
@@ -289,6 +289,17 @@ impl ActiveConnection {
         };
         let mut handshake = build_handshake(&noise, true).context("noise init")?;
         let hello_bytes = handshake.write_message(&[]).context("noise message one")?;
+        let device_public = device_keys.public;
+        let proof_context = zkp::derive_handshake_context(
+            state.domain.as_str(),
+            &device_id,
+            &device_public,
+            &noise_public,
+        );
+        let proof = zkp::prove_handshake(&device_keys, &proof_context)
+            .context("generate handshake proof")?;
+        let proof_value = serde_json::to_value(&proof).context("serialize handshake proof")?;
+
         let mut hello_props: Map<String, Value> = Map::new();
         hello_props.insert("protocol_version".to_string(), json!(PROTOCOL_VERSION));
         hello_props.insert("pattern".to_string(), json!(pattern_label.clone()));
@@ -297,8 +308,13 @@ impl ActiveConnection {
             "client_static".to_string(),
             json!(encode_hex(&noise_public)),
         );
+        hello_props.insert(
+            "device_public".to_string(),
+            json!(encode_hex(&device_public)),
+        );
         hello_props.insert("handshake".to_string(), json!(encode_hex(&hello_bytes)));
         hello_props.insert("capabilities".to_string(), json!(["noise", "zstd"]));
+        hello_props.insert("zkp".to_string(), proof_value);
         if let Some(cert) = certificate_for_hello.as_ref() {
             hello_props.insert(
                 "certificate".to_string(),
