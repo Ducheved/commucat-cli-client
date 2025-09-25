@@ -2,8 +2,7 @@ use crate::hexutil::encode_hex;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use commucat_crypto::DeviceKeyPair;
-use std::fs::File;
-use std::io::Read;
+use getrandom::getrandom;
 
 pub fn generate_device_id(prefix: &str) -> String {
     let ts = Utc::now().timestamp_millis();
@@ -11,9 +10,8 @@ pub fn generate_device_id(prefix: &str) -> String {
 }
 
 pub fn generate_keypair() -> Result<DeviceKeyPair> {
-    let mut file = File::open("/dev/urandom").context("open /dev/urandom")?;
     let mut seed = [0u8; 64];
-    file.read_exact(&mut seed).context("read entropy")?;
+    getrandom(&mut seed).context("sample entropy")?;
     DeviceKeyPair::from_seed(&seed).context("derive keypair")
 }
 

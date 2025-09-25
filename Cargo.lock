@@ -367,6 +367,7 @@ dependencies = [
  "commucat-proto",
  "crossterm",
  "futures",
+ "getrandom 0.2.16",
  "h2",
  "http",
  "ratatui",
