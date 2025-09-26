@@ -59,6 +59,9 @@ jobs:
         run: |
           choco install --no-progress -y cmake --installargs 'ADD_CMAKE_TO_PATH=System'
           choco install --no-progress -y nasm
+          choco install --no-progress -y openssl.light
+          choco install --no-progress -y libvpx
+          choco install --no-progress -y opus
 
       - name: Build release
         run: cargo build --release --target ${{ matrix.target }}
