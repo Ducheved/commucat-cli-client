@@ -33,37 +33,39 @@ CommuCat CLI Client подключается к серверу CommuCat, вып�
 | Rust      | 1.75+  | для сборки клиента из исходников |
 | Сервер    | CommuCat 1.0+ | HTTPS, включает REST `/api/*` |
 | TLS       | Публичный CA или путь к self-signed CA (`--tls-ca`), для отладки допустим `--insecure` |
-
----
-
 ## Установка
 ### Из исходников
 ```bash
+### Из исходников
+
+```bash
 git clone https://github.com/ducheved/commucat-cli-client.git
 cd commucat-cli-client
-cargo build --release
-# бинарь появится в target/release/commucat-cli-client
-```
+> - Windows (Chocolatey + MSYS2/WSL): `choco install vpx` и убедитесь, что `pkg-config` видит `lib/pkgconfig/vpx.pc`. Можно задать `setx PKG_CONFIG_PATH "C:\ProgramData\chocolatey\lib\vpx\tools\pkgconfig"`
+>
 
 ### Готовые релизы
-1. Перейдите в GitHub Releases.
+
 2. Скачайте архив `commucat-cli-client-<platform>.tar.gz`.
 3. Распакуйте и добавьте бинарь в `$PATH` (пример для Linux):
+
    ```bash
    tar -xzf commucat-cli-client-linux-amd64.tar.gz -C /usr/local/bin
    chmod +x /usr/local/bin/commucat-cli-client
+
    ```
 
 ### Проверка
+
 ```bash
 commucat-cli-client --help
 ```
 Должны отобразиться команды `init`, `pair`, `claim`, `devices`, `friends`, `docs`, `tui`.
-
 ---
-
 ## Быстрый старт
+
 1. **Создайте профиль устройства.**
+
    ```bash
    commucat-cli-client init \
      --server https://chat.example:8443 \

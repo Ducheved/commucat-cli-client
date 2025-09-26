@@ -1,8 +1,4 @@
 use std::collections::HashMap;
-use std::convert::TryFrom;
-use std::ffi::CStr;
-use std::mem::MaybeUninit;
-use std::ptr;
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Utc};
@@ -10,12 +6,9 @@ use commucat_proto::call::{
     AudioCodec, AudioParameters as AudioConfig, CallMediaProfile as MediaConfig, VideoCodec,
     VideoParameters as VideoConfig,
 };
-use libvpx::ffi::{
-    VPX_CODEC_OK, VPX_DECODER_ABI_VERSION, vpx_codec_ctx, vpx_codec_dec_cfg,
-    vpx_codec_dec_init_ver, vpx_codec_decode, vpx_codec_destroy, vpx_codec_error,
-    vpx_codec_get_frame, vpx_codec_iter_t, vpx_codec_vp8_dx, vpx_codec_vp9_dx,
-};
 use opus::{Channels as OpusChannels, Decoder as OpusDecoder};
+use vpx_rs::dec::CodecId as DecoderCodecId;
+use vpx_rs::{Decoder, DecoderConfig};
 
 #[derive(Debug, Clone)]
 pub struct AudioMetrics {
@@ -54,12 +47,12 @@ impl MediaManager {
             self.audio_streams.insert(call_id.to_string(), stream);
         }
 
-        if let Some(video) = media.video.as_ref() {
-            if !self.video_streams.contains_key(call_id) {
-                let stream = VideoStream::from_config(video)
-                    .with_context(|| "failed to initialise VPX decoder")?;
-                self.video_streams.insert(call_id.to_string(), stream);
-            }
+        if let Some(video) = media.video.as_ref()
+            && !self.video_streams.contains_key(call_id)
+        {
+            let stream = VideoStream::from_config(video)
+                .with_context(|| "failed to initialise VPX decoder")?;
+            self.video_streams.insert(call_id.to_string(), stream);
         }
 
         Ok(())
@@ -123,10 +116,10 @@ impl AudioStream {
         let fallback_samples = ((self.sample_rate / 50).max(1)) as usize;
         let mut expected_samples = fallback_samples;
 
-        if !payload.is_empty() {
-            if let Ok(samples) = self.decoder.get_nb_samples(payload) {
-                expected_samples = samples;
-            }
+        if !payload.is_empty()
+            && let Ok(samples) = self.decoder.get_nb_samples(payload)
+        {
+            expected_samples = samples;
         }
 
         let required_len = expected_samples * self.channels as usize;
@@ -169,126 +162,8 @@ impl AudioStream {
     }
 }
 
-#[derive(Copy, Clone)]
-enum VpxCodecKind {
-    Vp8,
-    Vp9,
-}
-
-impl VpxCodecKind {
-    fn name(self) -> &'static str {
-        match self {
-            VpxCodecKind::Vp8 => "VP8",
-            VpxCodecKind::Vp9 => "VP9",
-        }
-    }
-}
-
-struct VpxDecoder {
-    ctx: vpx_codec_ctx,
-    iter: vpx_codec_iter_t,
-    kind: VpxCodecKind,
-}
-
-impl VpxDecoder {
-    fn new(kind: VpxCodecKind) -> Result<Self> {
-        let mut ctx = MaybeUninit::<vpx_codec_ctx>::uninit();
-        let cfg = MaybeUninit::<vpx_codec_dec_cfg>::zeroed();
-
-        let iface = unsafe {
-            match kind {
-                VpxCodecKind::Vp8 => vpx_codec_vp8_dx(),
-                VpxCodecKind::Vp9 => vpx_codec_vp9_dx(),
-            }
-        };
-
-        let ret = unsafe {
-            vpx_codec_dec_init_ver(
-                ctx.as_mut_ptr(),
-                iface,
-                cfg.as_ptr(),
-                0,
-                VPX_DECODER_ABI_VERSION as i32,
-            )
-        };
-
-        if ret != VPX_CODEC_OK {
-            bail!(
-                "failed to initialise {} decoder (code {})",
-                kind.name(),
-                ret as i32
-            );
-        }
-
-        let ctx = unsafe { ctx.assume_init() };
-
-        Ok(Self {
-            ctx,
-            iter: ptr::null_mut(),
-            kind,
-        })
-    }
-
-    fn decode_frames(&mut self, data: &[u8]) -> Result<Vec<(u32, u32)>> {
-        let data_len =
-            u32::try_from(data.len()).map_err(|_| anyhow!("VPX payload too large to decode"))?;
-        let data_ptr = if data.is_empty() {
-            ptr::null()
-        } else {
-            data.as_ptr()
-        };
-
-        let ret =
-            unsafe { vpx_codec_decode(&mut self.ctx, data_ptr, data_len, ptr::null_mut(), 0) };
-
-        self.iter = ptr::null_mut();
-
-        if ret != VPX_CODEC_OK {
-            let message = self
-                .error_message()
-                .unwrap_or_else(|| format!("code {}", ret as i32));
-            bail!("{} decode failed: {}", self.kind.name(), message);
-        }
-
-        let mut frames = Vec::new();
-        loop {
-            let img_ptr = unsafe { vpx_codec_get_frame(&mut self.ctx, &mut self.iter) };
-            if img_ptr.is_null() {
-                break;
-            }
-
-            let img = unsafe { &*img_ptr };
-            frames.push((img.d_w as u32, img.d_h as u32));
-        }
-
-        Ok(frames)
-    }
-
-    fn error_message(&mut self) -> Option<String> {
-        let ptr = unsafe { vpx_codec_error(&mut self.ctx) };
-
-        if ptr.is_null() {
-            None
-        } else {
-            Some(
-                unsafe { CStr::from_ptr(ptr) }
-                    .to_string_lossy()
-                    .into_owned(),
-            )
-        }
-    }
-}
-
-impl Drop for VpxDecoder {
-    fn drop(&mut self) {
-        unsafe {
-            vpx_codec_destroy(&mut self.ctx);
-        }
-    }
-}
-
 struct VideoStream {
-    decoder: VpxDecoder,
+    decoder: Decoder,
     width: u32,
     height: u32,
     frames_decoded: u64,
@@ -296,29 +171,38 @@ struct VideoStream {
 
 impl VideoStream {
     fn from_config(config: &VideoConfig) -> Result<Self> {
-        let kind = match config.codec {
-            VideoCodec::Vp8 => VpxCodecKind::Vp8,
-            VideoCodec::Vp9 => VpxCodecKind::Vp9,
+        let codec = match config.codec {
+            VideoCodec::Vp8 => DecoderCodecId::VP8,
+            VideoCodec::Vp9 => DecoderCodecId::VP9,
         };
 
-        let decoder = VpxDecoder::new(kind)?;
+        let width = config.max_resolution.width.max(1) as u32;
+        let height = config.max_resolution.height.max(1) as u32;
+        let decoder_config = DecoderConfig::new(codec, width, height);
+        let decoder = Decoder::new(decoder_config).context("failed to create VPX decoder")?;
 
         Ok(Self {
             decoder,
-            width: config.max_resolution.width.max(1) as u32,
-            height: config.max_resolution.height.max(1) as u32,
+            width,
+            height,
             frames_decoded: 0,
         })
     }
 
     fn ingest(&mut self, payload: &[u8]) -> Result<VideoMetrics> {
-        let frames = self.decoder.decode_frames(payload)?;
-        let produced = frames.len() as u64;
+        let frames = self
+            .decoder
+            .decode(payload)
+            .context("failed to decode VPX frame")?;
 
-        for (w, h) in frames {
-            if w > 0 && h > 0 {
-                self.width = w;
-                self.height = h;
+        let mut produced = 0u64;
+        for frame in frames {
+            produced += 1;
+            let width = frame.width();
+            let height = frame.height();
+            if width > 0 && height > 0 {
+                self.width = width;
+                self.height = height;
             }
         }
 
@@ -336,14 +220,13 @@ impl VideoStream {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use libvpx::ffi::{
-        self, VPX_DL_GOOD_QUALITY, VPX_ENCODER_ABI_VERSION, vpx_codec_ctx, vpx_codec_cx_pkt_kind,
-        vpx_codec_enc_cfg, vpx_codec_enc_config_default, vpx_codec_enc_init_ver, vpx_codec_encode,
-        vpx_codec_get_cx_data, vpx_codec_iter_t, vpx_codec_vp8_cx, vpx_img_alloc, vpx_img_free,
-    };
     use opus::{Application as OpusApplication, Encoder as OpusEncoder};
-    use std::mem::MaybeUninit;
-    use std::slice;
+    use std::num::NonZeroU32;
+    use vpx_rs::enc::CodecId as EncoderCodecId;
+    use vpx_rs::{
+        Encoder as VpxEncoder, EncoderConfig, EncoderFrameFlags, EncodingDeadline, ImageFormat,
+        Packet, RateControl, Timebase, YUVImageData,
+    };
 
     fn encode_opus_frame(encoder: &mut OpusEncoder, pcm: &[i16]) -> Vec<u8> {
         let mut buffer = vec![0u8; 4000];
@@ -353,110 +236,72 @@ mod tests {
     }
 
     struct TestVp8Encoder {
-        ctx: vpx_codec_ctx,
-        image: *mut ffi::vpx_image_t,
-        iter: vpx_codec_iter_t,
+        encoder: VpxEncoder<u8>,
+        width: u32,
+        height: u32,
+        buffer: Vec<u8>,
     }
 
     impl TestVp8Encoder {
         fn new(width: u32, height: u32) -> Self {
-            unsafe {
-                let iface = vpx_codec_vp8_cx();
-                let mut cfg = MaybeUninit::<vpx_codec_enc_cfg>::uninit();
-                let ret = vpx_codec_enc_config_default(iface, cfg.as_mut_ptr(), 0);
-                assert_eq!(ret, VPX_CODEC_OK);
-
-                let mut cfg = cfg.assume_init();
-                cfg.g_w = width;
-                cfg.g_h = height;
-                cfg.g_timebase.num = 1;
-                cfg.g_timebase.den = 30;
-                cfg.rc_target_bitrate = (width * height / 1000).max(64);
-
-                let mut ctx = MaybeUninit::<vpx_codec_ctx>::uninit();
-                let ret = vpx_codec_enc_init_ver(
-                    ctx.as_mut_ptr(),
-                    iface,
-                    &cfg,
-                    0,
-                    VPX_ENCODER_ABI_VERSION as i32,
-                );
-                assert_eq!(ret, VPX_CODEC_OK);
-
-                let ctx = ctx.assume_init();
-
-                let image = vpx_img_alloc(
-                    ptr::null_mut(),
-                    ffi::vpx_img_fmt::VPX_IMG_FMT_I420,
-                    width,
-                    height,
-                    1,
-                );
-                assert!(!image.is_null());
-
-                Self {
-                    ctx,
-                    image,
-                    iter: ptr::null_mut(),
-                }
+            let timebase = Timebase {
+                num: NonZeroU32::new(1).unwrap(),
+                den: NonZeroU32::new(30).unwrap(),
+            };
+            let mut config = EncoderConfig::<u8>::new(
+                EncoderCodecId::VP8,
+                width,
+                height,
+                timebase,
+                RateControl::ConstantQuality(10),
+            )
+            .unwrap();
+            config.lag_in_frames = 0;
+            let encoder = VpxEncoder::new(config).unwrap();
+            let buffer_len = ImageFormat::I420
+                .buffer_len(width as usize, height as usize)
+                .unwrap();
+            Self {
+                encoder,
+                width,
+                height,
+                buffer: vec![0u8; buffer_len],
             }
         }
 
         fn encode_frame(&mut self, luma_value: u8, pts: i64) -> Vec<u8> {
-            unsafe {
-                let img = &mut *self.image;
+            let width = self.width as usize;
+            let height = self.height as usize;
+            let y_len = width * height;
+            let chroma_width = width / 2;
+            let chroma_height = height / 2;
+            let chroma_len = chroma_width * chroma_height;
 
-                let y_stride = img.stride[0] as usize;
-                let y_height = img.d_h as usize;
-                let y_plane = slice::from_raw_parts_mut(img.planes[0], y_stride * y_height);
-                y_plane.fill(luma_value);
+            self.buffer[..y_len].fill(luma_value);
+            self.buffer[y_len..y_len + chroma_len].fill(128);
+            self.buffer[y_len + chroma_len..].fill(128);
 
-                let uv_stride = img.stride[1] as usize;
-                let chroma_height = (img.d_h as usize + 1) / 2;
-                let u_plane = slice::from_raw_parts_mut(img.planes[1], uv_stride * chroma_height);
-                let v_plane = slice::from_raw_parts_mut(img.planes[2], uv_stride * chroma_height);
-                u_plane.fill(128);
-                v_plane.fill(128);
+            let image = YUVImageData::from_raw_data(ImageFormat::I420, width, height, &self.buffer)
+                .unwrap();
 
-                let ret = vpx_codec_encode(
-                    &mut self.ctx,
-                    img,
+            let packets = self
+                .encoder
+                .encode(
                     pts,
                     1,
-                    0,
-                    u64::from(VPX_DL_GOOD_QUALITY),
-                );
-                assert_eq!(ret, VPX_CODEC_OK);
+                    image,
+                    EncodingDeadline::GoodQuality,
+                    EncoderFrameFlags::empty(),
+                )
+                .unwrap();
 
-                self.iter = ptr::null_mut();
-
-                let mut encoded: Option<Vec<u8>> = None;
-                loop {
-                    let pkt_ptr = vpx_codec_get_cx_data(&mut self.ctx, &mut self.iter);
-                    if pkt_ptr.is_null() {
-                        break;
-                    }
-
-                    let pkt = &*pkt_ptr;
-                    if pkt.kind == vpx_codec_cx_pkt_kind::VPX_CODEC_CX_FRAME_PKT {
-                        let frame = pkt.data.frame;
-                        let data = slice::from_raw_parts(frame.buf as *const u8, frame.sz as usize);
-                        encoded = Some(data.to_vec());
-                        break;
-                    }
+            for packet in packets {
+                if let Packet::CompressedFrame(frame) = packet {
+                    return frame.data;
                 }
-
-                encoded.expect("encoded VP8 frame")
             }
-        }
-    }
 
-    impl Drop for TestVp8Encoder {
-        fn drop(&mut self) {
-            unsafe {
-                vpx_img_free(self.image);
-                vpx_codec_destroy(&mut self.ctx);
-            }
+            panic!("encoded VP8 frame not produced");
         }
     }
 
@@ -488,9 +333,7 @@ mod tests {
         let quiet_packet = encode_opus_frame(&mut encoder, &quiet_pcm);
 
         let mut loud_pcm = quiet_pcm.clone();
-        for sample in &mut loud_pcm {
-            *sample = i16::MAX / 2;
-        }
+        loud_pcm.fill(i16::MAX / 2);
         let loud_packet = encode_opus_frame(&mut encoder, &loud_pcm);
 
         let quiet_level = stream.ingest(&quiet_packet).unwrap().level;
