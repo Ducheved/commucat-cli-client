@@ -41,6 +41,25 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Install codec dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libopus-dev libvpx-dev cmake nasm
+
+      - name: Install codec dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew update
+          brew install pkg-config opus libvpx cmake nasm
+
+      - name: Install codec dependencies (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install --no-progress -y cmake --installargs 'ADD_CMAKE_TO_PATH=System'
+          choco install --no-progress -y nasm
+
       - name: Build release
         run: cargo build --release --target ${{ matrix.target }}
 

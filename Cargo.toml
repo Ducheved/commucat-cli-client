@@ -39,3 +39,5 @@ getrandom = "0.2"
 directories = "5"
 uuid = { version = "1.10", features = ["v4"] }
 base64 = "0.21"
+opus = "0.3.0"
+libvpx = "0.1.1"

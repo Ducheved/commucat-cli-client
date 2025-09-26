@@ -833,12 +833,12 @@ impl EnhancedApp {
 
         // Quick actions
         let actions = vec![
-            Line::from("📞 F3 - Voice call"),
-            Line::from("🎥 F4 - Video call"),
-            Line::from("📎 F5 - Send file"),
-            Line::from("🎤 F6 - Voice message"),
-            Line::from("➕ F7 - Add member"),
-            Line::from("⚙️ F8 - Settings"),
+            Line::from("📞 Ctrl+F3 - Voice call"),
+            Line::from("🎥 Ctrl+F4 - Video call"),
+            Line::from("📎 Ctrl+F5 - Send file"),
+            Line::from("🎤 Ctrl+F6 - Voice message"),
+            Line::from("➕ Ctrl+F7 - Add member"),
+            Line::from("⚙️ Ctrl+F8 - Settings"),
         ];
 
         let actions_widget = Paragraph::new(actions).block(
@@ -1422,6 +1422,7 @@ impl EnhancedApp {
             Line::from("Press 'a' to toggle animations"),
             Line::from("Press 's' to toggle sound"),
             Line::from("Press 'e' to toggle emoji mode"),
+            Line::from("Press Ctrl+F8 to open this view"),
         ];
 
         let settings_widget = Paragraph::new(settings).block(
@@ -1469,7 +1470,7 @@ impl EnhancedApp {
 
     fn render_status_bar(&self, frame: &mut UiFrame, area: Rect) {
         let status = format!(
-            " {} | Device: {} | Server: {} | Session: {} | F1: Help | F10: Quit ",
+            " {} | Device: {} | Server: {} | Session: {} | F1: Help | Ctrl+F10: Quit ",
             if self.connected {
                 "🟢 Online"
             } else {
@@ -1638,6 +1639,186 @@ impl EnhancedApp {
         self.notifications.retain(|n| n.expires_at > now);
     }
 
+    fn switch_view(&mut self, view: AppView) {
+        if self.view != view {
+            self.transition_progress = 0.0;
+        }
+        self.view = view;
+    }
+
+    fn cycle_theme(&mut self) {
+        self.theme = match self.theme {
+            Theme::Dark => Theme::Light,
+            Theme::Light => Theme::Cyberpunk,
+            Theme::Cyberpunk => Theme::Kawaii,
+            Theme::Kawaii => Theme::Dark,
+        };
+        self.add_notification(
+            format!("Theme changed to {:?}", self.theme),
+            NotificationLevel::Info,
+        );
+    }
+
+    fn toggle_animations(&mut self) {
+        self.animations_enabled = !self.animations_enabled;
+        self.add_notification(
+            format!(
+                "Animations {}",
+                if self.animations_enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+            ),
+            NotificationLevel::Info,
+        );
+    }
+
+    fn toggle_sound(&mut self) {
+        self.sound_enabled = !self.sound_enabled;
+        self.add_notification(
+            format!("Sound {}", if self.sound_enabled { "on" } else { "muted" }),
+            NotificationLevel::Info,
+        );
+    }
+
+    fn toggle_emoji_mode(&mut self) {
+        self.emoji_mode = !self.emoji_mode;
+        self.add_notification(
+            format!(
+                "Emoji mode {}",
+                if self.emoji_mode {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+            ),
+            NotificationLevel::Info,
+        );
+    }
+
+    fn begin_voice_recording(&mut self) {
+        self.voice_recording = true;
+        self.wave_animation.reset();
+        self.voice_buffer.clear();
+        self.voice_amplitude = 0.0;
+        self.add_notification(
+            "🎙️ Voice recording started (press Space or Ctrl+F6 to finish)".to_string(),
+            NotificationLevel::Info,
+        );
+    }
+
+    fn end_voice_recording(&mut self) -> Result<()> {
+        self.voice_recording = false;
+        self.voice_amplitude = 0.0;
+        self.finalize_voice_recording()
+    }
+
+    fn handle_call_shortcut(&mut self, video: bool) {
+        if !self.connected {
+            self.add_notification(
+                "Connect before starting a call".to_string(),
+                NotificationLevel::Warning,
+            );
+            return;
+        }
+
+        let Some((channel_name, _channel_id)) = self
+            .channels
+            .get(self.active_channel)
+            .filter(|channel| channel.id != 0)
+            .map(|channel| (channel.name.clone(), channel.id))
+        else {
+            self.add_notification(
+                "Select an active chat before starting a call".to_string(),
+                NotificationLevel::Warning,
+            );
+            return;
+        };
+
+        let action = if video { "Video" } else { "Voice" };
+        self.switch_view(AppView::Calls);
+        self.add_notification(
+            format!("{} call shortcut prepared for {}", action, channel_name),
+            NotificationLevel::Info,
+        );
+        self.add_system_message(format!(
+            "{} call shortcut pressed for channel {} — awaiting implementation",
+            action, channel_name
+        ));
+    }
+
+    fn handle_send_file_shortcut(&mut self) {
+        let Some((channel_name, channel_id)) = self
+            .channels
+            .get(self.active_channel)
+            .filter(|channel| channel.id != 0)
+            .map(|channel| (channel.name.clone(), channel.id))
+        else {
+            self.add_notification(
+                "Select an active chat before sending files".to_string(),
+                NotificationLevel::Warning,
+            );
+            return;
+        };
+
+        self.switch_view(AppView::Chat);
+        self.input = format!("/send-file {} ", channel_id);
+        self.add_notification(
+            format!(
+                "Enter a file path for {} after the shortcut (feature placeholder)",
+                channel_name
+            ),
+            NotificationLevel::Info,
+        );
+    }
+
+    fn handle_add_member_shortcut(&mut self) {
+        let Some(group_id) = self
+            .channels
+            .get(self.active_channel)
+            .and_then(|channel| channel.group_id.clone())
+        else {
+            self.add_notification(
+                "Current channel is not linked to a group".to_string(),
+                NotificationLevel::Warning,
+            );
+            return;
+        };
+
+        self.switch_view(AppView::Chat);
+        self.input = format!("/group invite {} ", group_id);
+        self.add_notification(
+            format!("Group invite shortcut ready for {}", short_hex(&group_id)),
+            NotificationLevel::Info,
+        );
+    }
+
+    fn open_settings_shortcut(&mut self) {
+        self.switch_view(AppView::Settings);
+        self.add_notification("Opened settings".to_string(), NotificationLevel::Info);
+    }
+
+    fn handle_voice_message_shortcut(&mut self) -> Result<()> {
+        if !self.connected {
+            self.add_notification(
+                "Connect before recording a voice memo".to_string(),
+                NotificationLevel::Warning,
+            );
+            return Ok(());
+        }
+
+        if self.voice_recording {
+            self.end_voice_recording()?;
+            self.switch_view(AppView::Chat);
+            Ok(())
+        } else {
+            self.switch_view(AppView::Voice);
+            self.begin_voice_recording();
+            Ok(())
+        }
+    }
+
     // Event handlers (stubs for now)
     async fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
         // Handle key input
@@ -1645,6 +1826,15 @@ impl EnhancedApp {
             KeyCode::F(10) | KeyCode::Esc if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.should_quit = true;
             }
+            KeyCode::F(n) if key.modifiers.contains(KeyModifiers::CONTROL) => match n {
+                3 => self.handle_call_shortcut(false),
+                4 => self.handle_call_shortcut(true),
+                5 => self.handle_send_file_shortcut(),
+                6 => self.handle_voice_message_shortcut()?,
+                7 => self.handle_add_member_shortcut(),
+                8 => self.open_settings_shortcut(),
+                _ => {}
+            },
             KeyCode::Tab => {
                 // Cycle through views
                 let current_idx = self
@@ -1669,15 +1859,11 @@ impl EnhancedApp {
             KeyCode::Char('r') if self.view == AppView::Devices => {
                 self.refresh_devices().await?;
             }
-            KeyCode::Char(' ') if self.view == AppView::Voice => {
-                self.voice_recording = !self.voice_recording;
+            KeyCode::Char(' ') if self.view == AppView::Voice && key.modifiers.is_empty() => {
                 if self.voice_recording {
-                    self.wave_animation.reset();
-                    self.voice_buffer.clear();
-                    self.voice_amplitude = 0.0;
+                    self.end_voice_recording()?;
                 } else {
-                    self.voice_amplitude = 0.0;
-                    self.finalize_voice_recording()?;
+                    self.begin_voice_recording();
                 }
             }
             KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::ALT) => {
@@ -1690,6 +1876,37 @@ impl EnhancedApp {
                     self.input.push_str(emoji.1);
                     self.input.push(' ');
                 }
+            }
+            KeyCode::Char('t') if self.view == AppView::Settings && key.modifiers.is_empty() => {
+                self.cycle_theme();
+            }
+            KeyCode::Char('a') if self.view == AppView::Settings && key.modifiers.is_empty() => {
+                self.toggle_animations();
+            }
+            KeyCode::Char('s') if self.view == AppView::Settings && key.modifiers.is_empty() => {
+                self.toggle_sound();
+            }
+            KeyCode::Char('e') if self.view == AppView::Settings && key.modifiers.is_empty() => {
+                self.toggle_emoji_mode();
+            }
+            KeyCode::Char('c') if self.view == AppView::Calls && key.modifiers.is_empty() => {
+                self.handle_call_shortcut(false);
+            }
+            KeyCode::Char('v') if self.view == AppView::Calls && key.modifiers.is_empty() => {
+                self.handle_call_shortcut(true);
+            }
+            KeyCode::Char('m') if self.view == AppView::Calls && key.modifiers.is_empty() => {
+                self.add_notification(
+                    "Mute toggle placeholder — audio controls not yet wired".to_string(),
+                    NotificationLevel::Info,
+                );
+            }
+            KeyCode::Char('e') if self.view == AppView::Calls && key.modifiers.is_empty() => {
+                self.add_notification(
+                    "End call shortcut acknowledged — call teardown pending implementation"
+                        .to_string(),
+                    NotificationLevel::Info,
+                );
             }
             KeyCode::Char(c) => {
                 if let Some(view) = self
@@ -2635,18 +2852,7 @@ impl EnhancedApp {
                     self.update_presence(state).await?;
                 }
             }
-            "theme" => {
-                self.theme = match self.theme {
-                    Theme::Dark => Theme::Light,
-                    Theme::Light => Theme::Cyberpunk,
-                    Theme::Cyberpunk => Theme::Kawaii,
-                    Theme::Kawaii => Theme::Dark,
-                };
-                self.add_notification(
-                    format!("Theme changed to {:?}", self.theme),
-                    NotificationLevel::Info,
-                );
-            }
+            "theme" => self.cycle_theme(),
             "group" => self.handle_group_command(&parts[1..]).await?,
             "assist" => {
                 if parts.len() < 2 {
@@ -2656,6 +2862,19 @@ impl EnhancedApp {
                     );
                 } else {
                     self.request_p2p_assist(parts[1]).await?;
+                }
+            }
+            "send-file" => {
+                if parts.len() < 2 {
+                    self.add_notification(
+                        "Usage: /send-file <path>".to_string(),
+                        NotificationLevel::Warning,
+                    );
+                } else {
+                    self.add_notification(
+                        format!("Sending files isn't wired yet ({} provided)", parts[1]),
+                        NotificationLevel::Info,
+                    );
                 }
             }
             "quit" | "exit" => self.should_quit = true,
@@ -3091,10 +3310,19 @@ impl EnhancedApp {
             return Ok(());
         }
 
-        let channel_group_id = self
+        let (channel_id, channel_group_id) = self
             .channels
             .get(self.active_channel)
-            .and_then(|channel| channel.group_id.clone());
+            .map(|channel| (channel.id, channel.group_id.clone()))
+            .unwrap_or((0, None));
+
+        if channel_id == 0 {
+            self.add_notification(
+                "Select a conversation channel before sending messages".to_string(),
+                NotificationLevel::Warning,
+            );
+            return Ok(());
+        }
 
         if let Some(group_id) = channel_group_id
             && self.groups.get(&group_id).is_some_and(|group| {
@@ -3109,7 +3337,6 @@ impl EnhancedApp {
         }
 
         let channel = &mut self.channels[self.active_channel];
-        let channel_id = channel.id;
 
         // Add message to local history
         let entry = MessageEntry {

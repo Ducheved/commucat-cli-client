@@ -22,6 +22,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Install codec dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libopus-dev libvpx-dev cmake nasm
+
       - name: Format check
         run: cargo fmt --all -- --check
 
