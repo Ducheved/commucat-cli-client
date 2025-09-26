@@ -57,11 +57,26 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
+
           choco install --no-progress -y cmake --installargs 'ADD_CMAKE_TO_PATH=System'
           choco install --no-progress -y nasm
           choco install --no-progress -y openssl.light
-          choco install --no-progress -y libvpx
-          choco install --no-progress -y opus
+
+          $env:VCPKG_ROOT = Join-Path $env:RUNNER_TEMP 'vcpkg'
+          if (-not (Test-Path $env:VCPKG_ROOT)) {
+            git clone https://github.com/microsoft/vcpkg.git $env:VCPKG_ROOT
+          }
+
+          & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
+          & "$env:VCPKG_ROOT\vcpkg.exe" install opus:x64-windows libvpx:x64-windows
+
+          $tripletRoot = Join-Path $env:VCPKG_ROOT 'installed/x64-windows'
+          Add-Content -Path $env:GITHUB_ENV -Value "VCPKG_ROOT=$env:VCPKG_ROOT"
+          Add-Content -Path $env:GITHUB_ENV -Value 'VCPKG_DEFAULT_TRIPLET=x64-windows'
+          Add-Content -Path $env:GITHUB_ENV -Value "LIB=$(Join-Path $tripletRoot 'lib');$env:LIB"
+          Add-Content -Path $env:GITHUB_ENV -Value "INCLUDE=$(Join-Path $tripletRoot 'include');$env:INCLUDE"
+          Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $tripletRoot 'bin')
 
       - name: Build release
         run: cargo build --release --target ${{ matrix.target }}
@@ -96,6 +111,7 @@ jobs:
     name: Publish Release
     needs: build
     runs-on: ubuntu-latest
+    if: always()
     permissions:
       contents: write
     steps:
